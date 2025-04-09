@@ -1,22 +1,14 @@
 import streamlit as st
 import datetime
 import gspread
-from oauth2client.service_account import ServiceAccountCredentials
+from google.oauth2.service_account import Credentials
 import pandas as pd
 
-# 加上 scope
-SCOPES = [
-    "https://www.googleapis.com/auth/spreadsheets",
-    "https://www.googleapis.com/auth/drive"
-]
-
-# Google auth
-creds_dict = st.secrets["google_service_account"]
-credentials = Credentials.from_service_account_info(creds_dict, scopes=SCOPES)
-
-# gspread
-gc = gspread.authorize(credentials)
-sheet = gc.open("迷惘但想搞懂的我").sheet1
+# --- Google Sheets Setup ---
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = Credentials.from_service_account_info(st.secrets["google_auth"], scopes=scope)
+client = gspread.authorize(creds)
+sheet = client.open("迷惘但想搞懂的我").sheet1
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="迷惘但想搞懂的我", layout="centered")
