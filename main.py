@@ -65,29 +65,3 @@ try:
         st.info("目前還沒有紀錄喔。")
 except Exception as e:
     st.error(f"讀取紀錄時發生錯誤：{e}")
-
-# --- Minimalist UI Styling ---
-st.markdown("""
-<style>
-    .stApp {
-        background-color: #fff;
-        color: #111;
-        font-family: 'Helvetica Neue', sans-serif;
-        padding: 1rem;
-    }
-
-    .css-1d391kg p {
-        font-size: 18px !important;
-        line-height: 1.6;
-    }
-
-    @media screen and (max-width: 768px) {
-        .css-1d391kg p {
-            font-size: 20px !important;
-        }
-        .stTextInput input, .stTextArea textarea {
-            font-size: 16px !important;
-        }
-    }
-</style>
-""", unsafe_allow_html=True)
