@@ -43,12 +43,12 @@ if st.button("提交"):
 
 # --- 顯示過去紀錄 ---
 st.markdown("---")
-st.subheader("📜 歷史紀錄（最近10筆）")
+st.subheader("📜 歷史紀錄（最近20筆）")
 try:
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
     if not df.empty:
-        df = df.tail(10)
+        df = df.tail(20)
         for index, row in df.iterrows():
             st.markdown(f"""
             <div style='border:1px solid #ccc; border-radius:10px; padding:10px; margin-bottom:10px;'>
