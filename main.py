@@ -37,7 +37,6 @@ if not st.session_state.logged_in:
         if username:
             st.session_state.logged_in = True
             st.session_state.user = username
-            # 若新使用者，先 append 於 sheet 以保留欄位結構
             if username not in USERS:
                 sheet.append_row([username, datetime.date.today().strftime("%Y-%m-%d")] + [""]*6)
             components.html("""<script>window.location.reload();</script>""", height=0)
@@ -69,11 +68,14 @@ if st.button("提交 / Submit"):
     st.success("已送出！明天見🎉")
     st.markdown("---")
 
-# --- History & Mood Trend ---
-st.subheader("📜 歷史紀錄 (最近20筆)")
+# --- 顯示過去紀錄與趨勢圖 ---
+st.markdown("---")
+st.subheader("📜 歷史紀錄（最近10筆）")
 try:
-    df = pd.DataFrame(sheet.get_all_records())
-    # normalize columns
+    data = sheet.get_all_records()
+    df = pd.DataFrame(data)
+
+    # 欄位名稱標準化
     col_map = {}
     for col in df.columns:
         if '使用者' in col:
@@ -94,29 +96,30 @@ try:
             col_map[col] = '明天你想做什麼'
     df.rename(columns=col_map, inplace=True)
 
-    if df.empty:
-        st.info("尚無紀錄")
-    else:
-        # filter user
-        if user != 'admin':
-            df = df[df['使用者'] == user]
-        recent = df.tail(20)
-        for _, row in recent.iterrows():
+    if not df.empty:
+        df = df[df['使用者'] == user].tail(10)
+        for index, row in df.iterrows():
             st.markdown(f"""
-            **{row['日期']}** — {row['今天你做了什麼']} (感受: {row['今天整體感受']}/10)<br>
-            🎯 {row['今天有感覺的事']} | 🚫 {row['今天最不想再來一次的事']}<br>
-            🌱 {row['明天你想做什麼']}
+            <div style='border:1px solid #ccc; border-radius:10px; padding:10px; margin-bottom:10px;'>
+                <strong>🗓️ 日期：</strong> {row.get('日期', '')}<br>
+                <strong>📌 今天做了什麼：</strong> {row.get('今天你做了什麼', '')}<br>
+                <strong>🎯 有感覺的事：</strong> {row.get('今天有感覺的事', '')}<br>
+                <strong>📊 整體感受：</strong> {row.get('今天整體感受', '')}/10<br>
+                <strong>🧠 是自己選的嗎：</strong> {row.get('今天做的事，是自己選的嗎？', '')}<br>
+                <strong>🚫 最不想再來一次：</strong> {row.get('今天最不想再來一次的事', '')}<br>
+                <strong>🌱 明天想做什麼：</strong> {row.get('明天你想做什麼', '')}
+            </div>
             """, unsafe_allow_html=True)
 
+        # 心情趨勢圖
         st.markdown("---")
         st.subheader("📈 心情趨勢圖 / Mood Trend")
-        mood_df = recent[['日期', '今天整體感受']].tail(11).copy()
+        mood_df = df[['日期', '今天整體感受']].copy()
         mood_df.columns = ['date', 'mood']
         mood_df['date'] = pd.to_datetime(mood_df['date'])
         mood_df['mood'] = pd.to_numeric(mood_df['mood'], errors='coerce')
         mood_df = mood_df.dropna().sort_values('date')
 
-        # plot via pyplot
         plt.figure(figsize=(8,4))
         plt.plot(mood_df['date'], mood_df['mood'], marker='o')
         plt.title('Mood Trend Over Time')
@@ -125,6 +128,8 @@ try:
         plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
         plt.gcf().autofmt_xdate()
         st.pyplot()
+    else:
+        st.info("目前還沒有紀錄喔。")
 
 except Exception as e:
     st.error(f"讀取紀錄時發生錯誤：{e}")
