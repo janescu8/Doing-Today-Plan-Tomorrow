@@ -71,60 +71,57 @@ if st.button("提交 / Submit"):
 st.markdown("---")
 st.subheader("📜 歷史紀錄 (最近20筆) / History (Last 20)")
 try:
-    # 先取得原始表格所有值
+    # 取得所有值
     all_values = sheet.get_all_values()
-    if len(all_values) > 1:
+    # 如果只有 header 或無資料
+    if len(all_values) <= 1:
+        st.info("目前還沒有紀錄喔 / No entries yet.")
+    else:
         header_row = all_values[0]
         data_rows = all_values[1:]
-        # 如果資料列的欄位比 header 多一個，假設第一欄是使用者
+        # 檢查是否有額外的使用者欄
         if len(data_rows[0]) == len(header_row) + 1:
             header = ['使用者'] + header_row
         else:
             header = header_row
         df = pd.DataFrame(data_rows, columns=header)
-    else:
-        df = pd.DataFrame()
+        # 篩選非 admin 的使用者
+        if user != 'admin':
+            df = df[df['使用者'] == user]
+        # 顯示最近20筆
+        recent = df.tail(20)
+        for _, row in recent.iterrows():
+            st.markdown(f"""
+            <div style='border:1px solid #666; border-radius:8px; padding:8px; margin-bottom:8px;'>
+                <strong>👤 使用者 / User:</strong> {row['使用者']}<br>
+                <strong>📅 日期 / Date:</strong> {row['日期']}<br>
+                <strong>📌 做了什麼 / Doing:</strong> {row['今天你做了什麼']}<br>
+                <strong>🎯 感覺 / Feeling:</strong> {row['今天有感覺的事']}<br>
+                <strong>📊 感受 / Mood:</strong> {row['今天整體感受']}/10<br>
+                <strong>🧠 自選 / Self-choice:</strong> {row['今天做的事，是自己選的嗎？']}<br>
+                <strong>🚫 不想再來 / Don’t repeat:</strong> {row['今天最不想再來一次的事']}<br>
+                <strong>🌱 明日計畫 / Plan:</strong> {row['明天你想做什麼']}
+            </div>
+            """, unsafe_allow_html=True)
 
-    # 篩選當前使用者（非 admin）
-    if not df.empty and user != 'admin':
-        df = df[df['使用者'] == user]
+        st.markdown("---")
+        st.subheader("📈 Mood Log & Trend / 心情記錄與趨勢圖")
+        mood_df = df[['日期', '今天整體感受']].tail(11).copy()
+        mood_df.columns = ['date', 'mood']
+        mood_df['date'] = pd.to_datetime(mood_df['date'])
+        mood_df['mood'] = pd.to_numeric(mood_df['mood'], errors='coerce')
+        mood_df = mood_df.dropna().sort_values('date')
 
-    recent = df.tail(20)
-    for _, row in recent.iterrows():
-        st.markdown(f"""
-        <div style='border:1px solid #666; border-radius:8px; padding:8px; margin-bottom:8px;'>
-            <strong>👤 使用者 / User:</strong> {row['使用者']}<br>
-            <strong>📅 日期 / Date:</strong> {row['日期']}<br>
-            <strong>📌 做了什麼 / Doing:</strong> {row['今天你做了什麼']}<br>
-            <strong>🎯 感覺 / Feeling:</strong> {row['今天有感覺的事']}<br>
-            <strong>📊 感受 / Mood:</strong> {row['今天整體感受']}/10<br>
-            <strong>🧠 自選 / Self-choice:</strong> {row['今天做的事，是自己選的嗎？']}<br>
-            <strong>🚫 不想再來 / Don’t repeat:</strong> {row['今天最不想再來一次的事']}<br>
-            <strong>🌱 明日計畫 / Plan:</strong> {row['明天你想做什麼']}
-        </div>
-        """, unsafe_allow_html=True)
+        st.table(mood_df.assign(date=lambda x: x['date'].dt.strftime('%Y-%m-%d'))\
+                      .rename(columns={'date':'日期 / Date','mood':'感受 / Mood'}))
 
-    st.markdown("---")
-    st.subheader("📈 Mood Log & Trend / 心情記錄與趨勢圖")
-    mood_df = df[['日期', '今天整體感受']].tail(11).copy()
-    mood_df.columns = ['date', 'mood']
-    mood_df['date'] = pd.to_datetime(mood_df['date'])
-    mood_df['mood'] = pd.to_numeric(mood_df['mood'], errors='coerce')
-    mood_df = mood_df.dropna().sort_values('date')
-
-    st.table(mood_df.assign(date=lambda x: x['date'].dt.strftime('%Y-%m-%d'))\
-                  .rename(columns={'date':'日期 / Date','mood':'感受 / Mood'}))
-
-    fig, ax = plt.subplots()
-    ax.plot(mood_df['date'], mood_df['mood'], marker='o')
-    ax.set_title('Mood Trend Over Time / 心情趨勢')
-    ax.set_xlabel('Date / 日期')
-    ax.set_ylabel('Mood (1-10) / 感受')
-    ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%m-%d'))
-    fig.autofmt_xdate()
-    st.pyplot(fig)
-else:
-    st.info("目前還沒有紀錄喔 / No entries yet.")
-
+        fig, ax = plt.subplots()
+        ax.plot(mood_df['date'], mood_df['mood'], marker='o')
+        ax.set_title('Mood Trend Over Time / 心情趨勢')
+        ax.set_xlabel('Date / 日期')
+        ax.set_ylabel('Mood (1-10) / 感受')
+        ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%m-%d'))
+        fig.autofmt_xdate()
+        st.pyplot(fig)
 except Exception as e:
     st.error(f"讀取紀錄時發生錯誤：{e}")
