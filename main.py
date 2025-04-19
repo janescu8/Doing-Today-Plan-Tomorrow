@@ -4,29 +4,26 @@ import gspread
 from google.oauth2.service_account import Credentials
 import pandas as pd
 import matplotlib.pyplot as plt
+import streamlit.components.v1 as components
 
 # --- User Setup ---
-# Define allowed users (only names, no passwords)
-USERS = ["Sanny", "Arfaa"]  # add more usernames as needed
+USERS = ["admin", "user1", "user2"]  # 可自訂使用者清單
 
-# Initialize session state
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
-# Login screen: select or enter username
 if not st.session_state.logged_in:
     st.sidebar.title("🔒 請選擇或輸入使用者名稱 / Select or enter your username")
     username = st.sidebar.selectbox("使用者名稱 / Username", USERS)
-    # Option to enter a new user name
     new_user = st.sidebar.text_input("或輸入新名稱 / Or enter a new username")
     if new_user:
         username = new_user.strip()
     if st.sidebar.button("登入 / Login"):
-        # log in if username is provided
         if username:
             st.session_state.logged_in = True
             st.session_state.user = username
-            st.experimental_rerun()
+            components.html("""<script>window.location.reload();</script>""", height=0)
+            st.stop()
         else:
             st.sidebar.error("請輸入有效的使用者名稱 / Please provide a valid username")
     st.stop()
@@ -41,15 +38,12 @@ sheet = client.open("迷惘但想搞懂的我").sheet1
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="🌀 迷惘但想搞懂的我", layout="centered")
-# Bilingual title
 st.title("🌀 迷惘但想搞懂的我 / Lost but Learning")
 st.markdown("黑白極簡，但情緒滿載 / Minimalist B&W, Full of Emotion")
 st.sidebar.success(f"已登入 / Logged in: {user}")
 
-# Get today's date
+# --- Input ---
 today = datetime.date.today().strftime("%Y-%m-%d")
-
-# --- Input Fields ---
 doing_today = st.text_input("📌 今天你做了什麼 / What did you do today?")
 feeling_event = st.text_input("🎯 今天有感覺的事 / What felt meaningful today?")
 overall_feeling = st.slider("📊 今天整體感受 (1-10) / Overall feeling today", 1, 10, 5)
@@ -58,13 +52,10 @@ dont_repeat = st.text_input("🚫 今天最不想再來一次的事 / What you w
 plan_tomorrow = st.text_input("🌱 明天你想做什麼 / What do you plan for tomorrow?")
 
 if st.button("提交 / Submit"):
-    # Append with username
     row = [user, today, doing_today, feeling_event, overall_feeling, self_choice, dont_repeat, plan_tomorrow]
     sheet.append_row(row)
     st.balloons()
     st.success("資料已送出，明天還記得來哦。/ Submitted! See you tomorrow.")
-
-    # Show submitted entry
     st.markdown("---")
     st.subheader("🎉 你今天記錄的是 / Today's entry:")
     st.write(f"👤 使用者 / User: {user}")
@@ -83,10 +74,8 @@ try:
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
     if not df.empty:
-        # Rename columns to expected
         df.columns = ['使用者', '日期', '今天你做了什麼', '今天有感覺的事', '今天整體感受',
                       '今天做的事，是自己選的嗎？', '今天最不想再來一次的事', '明天你想做什麼']
-        # Filter: non-admin users see only their own entries
         if user != 'admin':
             df = df[df['使用者'] == user]
         recent = df.tail(20)
@@ -104,7 +93,6 @@ try:
             </div>
             """, unsafe_allow_html=True)
 
-        # Mood Log & Trend
         st.markdown("---")
         st.subheader("📈 Mood Log & Trend / 心情記錄與趨勢圖")
         mood_df = df[['日期', '今天整體感受']].tail(11).copy()
@@ -113,10 +101,8 @@ try:
         mood_df['mood'] = pd.to_numeric(mood_df['mood'], errors='coerce')
         mood_df = mood_df.dropna().sort_values('date')
 
-        # Show mood table
         st.table(mood_df.assign(date=lambda x: x['date'].dt.strftime('%Y-%m-%d')).rename(columns={'date':'日期 / Date','mood':'感受 / Mood'}))
 
-        # Plot mood trend
         fig, ax = plt.subplots()
         ax.plot(mood_df['date'], mood_df['mood'], marker='o')
         ax.set_title('Mood Trend Over Time / 心情趨勢')
