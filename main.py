@@ -35,7 +35,6 @@ if not st.session_state.logged_in:
             st.session_state.user = username
             # Append new user to sheet if not exists
             if username not in USERS:
-                # write an empty record template for new user
                 sheet.append_row([username, datetime.date.today().strftime("%Y-%m-%d")] + [""]*6)
             components.html("""<script>window.location.reload();</script>""", height=0)
             st.stop()
@@ -94,7 +93,7 @@ try:
                 <strong>👤 使用者 / User:</strong> {row['使用者']}<br>
                 <strong>📅 日期 / Date:</strong> {row['日期']}<br>
                 <strong>📌 做了什麼 / Doing:</strong> {row['今天你做了什麼']}<br>
-                <strong>🎯 感覺 / Feeling:</strong> {row['今天有感覺的事']}<br>
+                <strong>🎯 感覺 / Feeling:</strong> {row['今天你有感覺的事']}<br>
                 <strong>📊 感受 / Mood:</strong> {row['今天整體感受']}/10<br>
                 <strong>🧠 自選 / Self-choice:</strong> {row['今天做的事，是自己選的嗎？']}<br>
                 <strong>🚫 不想再來 / Don’t repeat:</strong> {row['今天最不想再來一次的事']}<br>
