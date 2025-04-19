@@ -114,9 +114,9 @@ try:
 
         fig, ax = plt.subplots()
         ax.plot(mood_df['date'], mood_df['mood'], marker='o')
-        ax.set_title('Mood Trend Over Time / 心情趨勢')
-        ax.set_xlabel('Date / 日期')
-        ax.set_ylabel('Mood (1-10) / 感受')
+        ax.set_title('Mood Trend Over Time')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Mood (1-10)')
         ax.xaxis.set_major_formatter(plt.matplotlib.dates.DateFormatter('%m-%d'))
         fig.autofmt_xdate()
         st.pyplot(fig)
