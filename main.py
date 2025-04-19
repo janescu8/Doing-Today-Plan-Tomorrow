@@ -95,19 +95,19 @@ try:
         elif '明天' in col:
             col_map[col] = '明天你想做什麼'
     df.rename(columns=col_map, inplace=True)
-
+  
     if not df.empty:
         df = df[df['使用者'] == user].tail(10)
         for index, row in df.iterrows():
             st.markdown(f"""
             <div style='border:1px solid #ccc; border-radius:10px; padding:10px; margin-bottom:10px;'>
                 <strong>🗓️ 日期：</strong> {row.get('日期', '')}<br>
-                <strong>📌 今天做了什麼：</strong> {row.get('今天你做了什麼', '')}<br>
-                <strong>🎯 有感覺的事：</strong> {row.get('今天有感覺的事', '')}<br>
-                <strong>📊 整體感受：</strong> {row.get('今天整體感受', '')}/10<br>
-                <strong>🧠 是自己選的嗎：</strong> {row.get('今天做的事，是自己選的嗎？', '')}<br>
-                <strong>🚫 最不想再來一次：</strong> {row.get('今天最不想再來一次的事', '')}<br>
-                <strong>🌱 明天想做什麼：</strong> {row.get('明天你想做什麼', '')}
+                <strong>📌 今天你做了什麼 / What did you do today?：</strong> {row.get('今天你做了什麼', '')}<br>
+                <strong>🎯 今天有感覺的事 / What felt meaningful today?：</strong> {row.get('今天有感覺的事', '')}<br>
+                <strong>📊 今天整體感受 (1-10)：</strong> {row.get('今天整體感受', '')}/10<br>
+                <strong>🧠 是自主選擇嗎？/ Was it your choice?：</strong> {row.get('今天做的事，是自己選的嗎？', '')}<br>
+                <strong>🚫 今天最不想再來的事 / What you wouldn't repeat?：</strong> {row.get('今天最不想再來一次的事', '')}<br>
+                <strong>🌱 明天想做什麼 / Plans for tomorrow?：</strong> {row.get('明天你想做什麼', '')}
             </div>
             """, unsafe_allow_html=True)
 
@@ -121,13 +121,13 @@ try:
         mood_df = mood_df.dropna().sort_values('date')
 
         fig, ax = plt.subplots(figsize=(8, 4))
-ax.plot(mood_df['date'], mood_df['mood'], marker='o')
-ax.set_title('Mood Trend Over Time')
-ax.set_xlabel('Date')
-ax.set_ylabel('Mood')
-ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
-fig.autofmt_xdate()
-st.pyplot(fig)
+        ax.plot(mood_df['date'], mood_df['mood'], marker='o')
+        ax.set_title('Mood Trend Over Time')
+        ax.set_xlabel('Date')
+        ax.set_ylabel('Mood')
+        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+        fig.autofmt_xdate()
+        st.pyplot(fig)
     else:
         st.info("目前還沒有紀錄喔。")
 
