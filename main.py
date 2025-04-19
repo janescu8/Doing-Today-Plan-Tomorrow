@@ -6,9 +6,20 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import streamlit.components.v1 as components
 
-# --- User Setup ---
-USERS = ["Sanny"]  # 可自訂使用者清單
+# --- Google Sheets Setup ---
+scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+creds = Credentials.from_service_account_info(st.secrets["google_auth"], scopes=scope)
+client = gspread.authorize(creds)
+sheet = client.open("迷惘但想搞懂的我").sheet1
 
+# --- Dynamic Users Setup ---
+try:
+    raw_records = sheet.get_all_records()
+    USERS = sorted({rec['使用者'] for rec in raw_records if rec.get('使用者')})
+except Exception:
+    USERS = []
+
+# --- User Setup ---
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
@@ -22,6 +33,10 @@ if not st.session_state.logged_in:
         if username:
             st.session_state.logged_in = True
             st.session_state.user = username
+            # Append new user to sheet if not exists
+            if username not in USERS:
+                # write an empty record template for new user
+                sheet.append_row([username, datetime.date.today().strftime("%Y-%m-%d")] + [""]*6)
             components.html("""<script>window.location.reload();</script>""", height=0)
             st.stop()
         else:
@@ -29,12 +44,6 @@ if not st.session_state.logged_in:
     st.stop()
 else:
     user = st.session_state.user
-
-# --- Google Sheets Setup ---
-scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-creds = Credentials.from_service_account_info(st.secrets["google_auth"], scopes=scope)
-client = gspread.authorize(creds)
-sheet = client.open("迷惘但想搞懂的我").sheet1
 
 # --- Streamlit UI ---
 st.set_page_config(page_title="🌀 迷惘但想搞懂的我", layout="centered")
@@ -71,24 +80,13 @@ if st.button("提交 / Submit"):
 st.markdown("---")
 st.subheader("📜 歷史紀錄 (最近20筆) / History (Last 20)")
 try:
-    # 取得所有值
-    all_values = sheet.get_all_values()
-    # 如果只有 header 或無資料
-    if len(all_values) <= 1:
+    records = sheet.get_all_records()
+    df = pd.DataFrame(records)
+    if df.empty:
         st.info("目前還沒有紀錄喔 / No entries yet.")
     else:
-        header_row = all_values[0]
-        data_rows = all_values[1:]
-        # 檢查是否有額外的使用者欄
-        if len(data_rows[0]) == len(header_row) + 1:
-            header = ['使用者'] + header_row
-        else:
-            header = header_row
-        df = pd.DataFrame(data_rows, columns=header)
-        # 篩選非 admin 的使用者
         if user != 'admin':
             df = df[df['使用者'] == user]
-        # 顯示最近20筆
         recent = df.tail(20)
         for _, row in recent.iterrows():
             st.markdown(f"""
@@ -112,7 +110,7 @@ try:
         mood_df['mood'] = pd.to_numeric(mood_df['mood'], errors='coerce')
         mood_df = mood_df.dropna().sort_values('date')
 
-        st.table(mood_df.assign(date=lambda x: x['date'].dt.strftime('%Y-%m-%d'))\
+        st.table(mood_df.assign(date=lambda x: x['date'].dt.strftime('%Y-%m-%d'))  \
                       .rename(columns={'date':'日期 / Date','mood':'感受 / Mood'}))
 
         fig, ax = plt.subplots()
