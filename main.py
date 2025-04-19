@@ -7,7 +7,7 @@ import matplotlib.pyplot as plt
 import streamlit.components.v1 as components
 
 # --- User Setup ---
-USERS = ["admin", "user1", "user2"]  # 可自訂使用者清單
+USERS = ["Sanny"]  # 可自訂使用者清單
 
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
