@@ -120,14 +120,14 @@ try:
         mood_df['mood'] = pd.to_numeric(mood_df['mood'], errors='coerce')
         mood_df = mood_df.dropna().sort_values('date')
 
-        plt.figure(figsize=(8,4))
-        plt.plot(mood_df['date'], mood_df['mood'], marker='o')
-        plt.title('Mood Trend Over Time')
-        plt.xlabel('Date')
-        plt.ylabel('Mood')
-        plt.gca().xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
-        plt.gcf().autofmt_xdate()
-        st.pyplot()
+        fig, ax = plt.subplots(figsize=(8, 4))
+ax.plot(mood_df['date'], mood_df['mood'], marker='o')
+ax.set_title('Mood Trend Over Time')
+ax.set_xlabel('Date')
+ax.set_ylabel('Mood')
+ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
+fig.autofmt_xdate()
+st.pyplot(fig)
     else:
         st.info("目前還沒有紀錄喔。")
 
