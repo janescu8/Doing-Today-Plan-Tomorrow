@@ -54,7 +54,7 @@ st.markdown("黑白極簡，但情緒滿載 / Minimalist B&W, Full of Emotion")
 
 # --- Input Form ---
 today = datetime.date.today().strftime("%Y-%m-%d")
-doing_today = st.text_input("📌 今天你做了什麼 / What did you do today?")
+doing_today = st.text_area("📌 今天你做了什麼 / What did you do today?", height=150)
 feeling_event = st.text_input("🎯 今天有感覺的事 / What felt meaningful today?")
 overall_feeling = st.slider("📊 今天整體感受 (1-10)", 1, 10, 5)
 self_choice = st.text_input("🧠 是自主選擇嗎？/ Was it your choice?")
