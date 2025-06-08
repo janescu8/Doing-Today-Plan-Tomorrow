@@ -172,36 +172,40 @@ st.markdown("---")
 st.subheader("📤 匯出紀錄 / Export Entries as CSV")
 
 export_option = st.radio("選擇要匯出的內容 / Choose what to export:", [
-    "🔹 單日紀錄 / One Day",
-    "🔸 最近10筆 / Recent 10 Entries",
-    "🔺 所有紀錄 / All Entries"
+    "🔹 單日紀錄 / One Day (Current User)",
+    "🔸 最近10筆 / Recent 10 Entries (Current User)",
+    "🔺 所有紀錄 / All Entries (All Users)"
 ])
 
-if export_option == "🔹 單日紀錄 / One Day":
+if export_option == "🔹 單日紀錄 / One Day (Current User)":
     export_date = st.selectbox("選擇日期 / Select a date", user_data['日期'].dt.strftime('%Y-%m-%d').tolist())
     export_df = user_data[user_data['日期'].dt.strftime('%Y-%m-%d') == export_date]
 
-elif export_option == "🔸 最近10筆 / Recent 10 Entries":
+elif export_option == "🔸 最近10筆 / Recent 10 Entries (Current User)":
     export_df = user_data.head(10)
 
-elif export_option == "🔺 所有紀錄 / All Entries":
-    export_df = user_data
+elif export_option == "🔺 所有紀錄 / All Entries (All Users)":
+    all_data = sheet.get_all_records()
+    export_df = pd.DataFrame(all_data)
 
-# 重新命名欄位 (可選)
-export_df = export_df.rename(columns={
-    '日期': 'Date',
-    '今天你做了什麼': 'What did you do today?',
-    '今天有感覺的事': 'Meaningful Event',
-    '今天整體感受': 'Mood',
-    '今天做的事，是自己選的嗎？': 'Was it your choice?',
-    '今天最不想再來一次的事': 'What you wouldn’t repeat',
-    '明天你想做什麼': 'Plans for tomorrow'
-})
+    # Rename columns only if they exist in the full sheet
+    export_df.rename(columns={
+        '使用者': 'User',
+        '日期': 'Date',
+        '今天你做了什麼': 'What did you do today?',
+        '今天有感覺的事': 'Meaningful Event',
+        '今天整體感受': 'Mood',
+        '今天做的事，是自己選的嗎？': 'Was it your choice?',
+        '今天最不想再來一次的事': 'What you wouldn’t repeat',
+        '明天你想做什麼': 'Plans for tomorrow'
+    }, inplace=True)
 
-csv = export_df.to_csv(index=False).encode('utf-8-sig')  # Use UTF-8 with BOM for Excel compatibility
+# Export CSV
+csv = export_df.to_csv(index=False).encode('utf-8-sig')  # UTF-8 with BOM
 st.download_button(
     label="📥 下載 CSV / Download CSV",
     data=csv,
-    file_name=f"{user}_journal_export.csv",
+    file_name="journal_export.csv",
     mime='text/csv'
 )
+
