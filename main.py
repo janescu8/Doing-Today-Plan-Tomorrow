@@ -1,3 +1,4 @@
+
 import streamlit as st
 import datetime
 import gspread
@@ -35,7 +36,7 @@ if not st.session_state.logged_in:
             st.session_state.logged_in = True
             st.session_state.user = username
             if username not in USERS:
-                sheet.append_row([username, datetime.date.today().strftime("%Y-%m-%d")] + [""]*6)
+                sheet.append_row([username, datetime.date.today().strftime("%Y-%m-%d")] + [""]*7)
             components.html("""<script>window.location.reload();</script>""", height=0)
             st.stop()
         else:
@@ -57,9 +58,10 @@ overall_feeling = st.slider("📊 今天整體感受 (1-10)", 1, 10, 5)
 self_choice = st.text_area("🧠 是自主選擇嗎？/ Was it your choice?")
 dont_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?")
 plan_tomorrow = st.text_area("🌱 明天想做什麼 / Plans for tomorrow?")
+tags = st.text_input("🏷️ 標籤 / Tags (comma-separated)")
 
 if st.button("提交 / Submit"):
-    row = [user, today, doing_today, feeling_event, overall_feeling, self_choice, dont_repeat, plan_tomorrow]
+    row = [user, today, doing_today, feeling_event, overall_feeling, self_choice, dont_repeat, plan_tomorrow, tags]
     sheet.append_row(row)
     st.balloons()
     st.success("已送出！明天見🎉")
@@ -71,27 +73,6 @@ st.subheader("📜 歷史紀錄（最近10筆）")
 try:
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
-
-    # 欄位名稱標準化
-    col_map = {}
-    for col in df.columns:
-        if '使用者' in col:
-            col_map[col] = '使用者'
-        elif '日期' in col:
-            col_map[col] = '日期'
-        elif '做了什麼' in col:
-            col_map[col] = '今天你做了什麼'
-        elif '整體感受' in col:
-            col_map[col] = '今天整體感受'
-        elif '感覺' in col:
-            col_map[col] = '今天有感覺的事'
-        elif '自己選' in col:
-            col_map[col] = '今天做的事，是自己選的嗎？'
-        elif '不想再' in col:
-            col_map[col] = '今天最不想再來一次的事'
-        elif '明天' in col:
-            col_map[col] = '明天你想做什麼'
-    df.rename(columns=col_map, inplace=True)
   
     if not df.empty:
         df = df[df['使用者'] == user].tail(10)
@@ -100,11 +81,12 @@ try:
             <div style='border:1px solid #ccc; border-radius:10px; padding:10px; margin-bottom:10px;'>
                 <strong>🗓️ 日期：</strong> {row.get('日期', '')}<br>
                 <strong>📌 今天你做了什麼 / What did you do today?：</strong> {row.get('今天你做了什麼', '')}<br>
-                <strong>🎯 今天有感覺的事 / What felt meaningful today?：</strong> {row.get('今天有感覺的事', '')}<br>
+                <strong>🎯 今天有感覺的事 / What felt meaningful today?：</strong> {row.get('今天你有感覺的事', '')}<br>
                 <strong>📊 今天整體感受 (1-10)：</strong> {row.get('今天整體感受', '')}/10<br>
                 <strong>🧠 是自主選擇嗎？/ Was it your choice?：</strong> {row.get('今天做的事，是自己選的嗎？', '')}<br>
                 <strong>🚫 今天最不想再來的事 / What you wouldn't repeat?：</strong> {row.get('今天最不想再來一次的事', '')}<br>
-                <strong>🌱 明天想做什麼 / Plans for tomorrow?：</strong> {row.get('明天你想做什麼', '')}
+                <strong>🌱 明天想做什麼 / Plans for tomorrow?：</strong> {row.get('明天你想做什麼', '')}<br>
+                <strong>🏷️ 標籤 / Tags：</strong> {row.get('標籤', '')}
             </div>
             """, unsafe_allow_html=True)
 
@@ -157,6 +139,15 @@ if not user_data.empty:
         new_choice = st.text_input("🧠 是自主選擇嗎？/ Was it your choice?", record_to_edit.get('今天做的事，是自己選的嗎？', ''))
         new_repeat = st.text_input("🚫 今天最不想再來的事 / What you wouldn't repeat?", record_to_edit.get('今天最不想再來一次的事', ''))
         new_plan = st.text_input("🌱 明天想做什麼 / Plans for tomorrow?", record_to_edit.get('明天你想做什麼', ''))
+        new_tags = st.text_input("🏷️ 標籤 / Tags (comma-separated)", record_to_edit.get('標籤', ''))
+
+    submitted = st.form_submit_button("更新紀錄 / Update Entry")
+    if submitted:
+        updated_row = [user, selected_date, new_doing, new_event, new_mood, new_choice, new_repeat, new_plan, new_tags]
+        sheet.update(f'A{row_number_in_sheet}:I{row_number_in_sheet}', [updated_row])
+        st.success(f\"{selected_date} 的紀錄已成功更新！ / Entry Updated\")
+        st.rerun()
+
 
         submitted = st.form_submit_button("更新紀錄 / Update Entry")
         if submitted:
@@ -197,8 +188,10 @@ elif export_option == "🔺 所有紀錄 / All Entries (All Users)":
         '今天整體感受': 'Mood',
         '今天做的事，是自己選的嗎？': 'Was it your choice?',
         '今天最不想再來一次的事': 'What you wouldn’t repeat',
-        '明天你想做什麼': 'Plans for tomorrow'
+        '明天你想做什麼': 'Plans for tomorrow',
+        '標籤': 'Tags'  # 🏷️ 新增這一行
     }, inplace=True)
+
 
 # Export CSV
 csv = export_df.to_csv(index=False).encode('utf-8-sig')  # UTF-8 with BOM
