@@ -141,12 +141,12 @@ if not user_data.empty:
         new_plan = st.text_input("🌱 明天想做什麼 / Plans for tomorrow?", record_to_edit.get('明天你想做什麼', ''))
         new_tags = st.text_input("🏷️ 標籤 / Tags (comma-separated)", record_to_edit.get('標籤', ''))
 
-    submitted = st.form_submit_button("更新紀錄 / Update Entry")
-    if submitted:
-        updated_row = [user, selected_date, new_doing, new_event, new_mood, new_choice, new_repeat, new_plan, new_tags]
-        sheet.update(f'A{row_number_in_sheet}:I{row_number_in_sheet}', [updated_row])
-        st.success(f"{selected_date} 的紀錄已成功更新！ / Entry Updated")
-        st.rerun()
+        submitted = st.form_submit_button("更新紀錄 / Update Entry")
+        if submitted:
+            updated_row = [user, selected_date, new_doing, new_event, new_mood, new_choice, new_repeat, new_plan, new_tags]
+            sheet.update(f'A{row_number_in_sheet}:I{row_number_in_sheet}', [updated_row])
+            st.success(f"{selected_date} 的紀錄已成功更新！ / Entry Updated")
+            st.rerun()
 else:
     st.info("目前尚無可供編輯的紀錄。")
 
