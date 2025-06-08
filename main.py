@@ -147,14 +147,6 @@ if not user_data.empty:
         sheet.update(f'A{row_number_in_sheet}:I{row_number_in_sheet}', [updated_row])
         st.success(f\"{selected_date} 的紀錄已成功更新！ / Entry Updated\")
         st.rerun()
-
-
-        submitted = st.form_submit_button("更新紀錄 / Update Entry")
-        if submitted:
-            updated_row = [user, selected_date, new_doing, new_event, new_mood, new_choice, new_repeat, new_plan]
-            sheet.update(f'A{row_number_in_sheet}:H{row_number_in_sheet}', [updated_row])
-            st.success(f"{selected_date} 的紀錄已成功更新！ / Entry Updated")
-            st.rerun()
 else:
     st.info("目前尚無可供編輯的紀錄。")
 
