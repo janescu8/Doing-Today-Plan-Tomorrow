@@ -15,10 +15,10 @@ sheet = client.open("doing-today-plan-tomorrow-plus").sheet1
 
 # --- Dynamic Users Setup ---
 try:
-raw_records = sheet.get_all_records()
-USERS = sorted({rec['使用者'] for rec in raw_records if rec.get('使用者')})
+    raw_records = sheet.get_all_records()
+    USERS = sorted({rec['使用者'] for rec in raw_records if rec.get('使用者')})
 except Exception:
-USERS = []
+    USERS = []
 
 # --- User Login ---
 if 'logged_in' not in st.session_state:
