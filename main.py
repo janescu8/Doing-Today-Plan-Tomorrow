@@ -134,11 +134,11 @@ if not user_data.empty:
     # 建立可編輯表單
     with st.form("edit_form"):
         new_doing = st.text_area("📌 今天你做了什麼 / What did you do today?", record_to_edit.get('今天你做了什麼', ''), height=100)
-        new_event = st.text_input("🎯 今天有感覺的事 / What felt meaningful today?", record_to_edit.get('今天你有感覺的事', ''))
+        new_event = st.text_area("🎯 今天有感覺的事 / What felt meaningful today?", record_to_edit.get('今天你有感覺的事', ''))
         new_mood = st.slider("📊 今天整體感受 (1-10)", 1, 10, int(record_to_edit.get('今天整體感受', 5)))
-        new_choice = st.text_input("🧠 是自主選擇嗎？/ Was it your choice?", record_to_edit.get('今天做的事，是自己選的嗎？', ''))
-        new_repeat = st.text_input("🚫 今天最不想再來的事 / What you wouldn't repeat?", record_to_edit.get('今天最不想再來一次的事', ''))
-        new_plan = st.text_input("🌱 明天想做什麼 / Plans for tomorrow?", record_to_edit.get('明天你想做什麼', ''))
+        new_choice = st.text_area("🧠 是自主選擇嗎？/ Was it your choice?", record_to_edit.get('今天做的事，是自己選的嗎？', ''))
+        new_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?", record_to_edit.get('今天最不想再來一次的事', ''))
+        new_plan = st.text_area("🌱 明天想做什麼 / Plans for tomorrow?", record_to_edit.get('明天你想做什麼', ''))
         new_tags = st.text_input("🏷️ 標籤 / Tags (comma-separated)", record_to_edit.get('標籤', ''))
 
         submitted = st.form_submit_button("更新紀錄 / Update Entry")
