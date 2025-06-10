@@ -12,7 +12,7 @@ import streamlit.components.v1 as components
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_info(st.secrets["google_auth"], scopes=scope)
 client = gspread.authorize(creds)
-sheet = client.open("doing-today-plan-tomorrow-plus").sheet1
+sheet = client.open("journal_export").sheet1
 
 # --- Dynamic Users Setup ---
 try:
