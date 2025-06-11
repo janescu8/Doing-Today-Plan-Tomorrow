@@ -68,24 +68,29 @@ if st.button("提交 / Submit"):
     st.markdown("---")
 
 # --- 顯示過去紀錄與趨勢圖 ---
+# 換行處理函數
+def render_multiline(text):
+    return text.replace('\n', '<br>')
+
 st.markdown("---")
 st.subheader("📜 歷史紀錄（最近10筆）")
+
 try:
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
-  
+
     if not df.empty:
         df = df[df['使用者'] == user].tail(10)
         for index, row in df.iterrows():
             st.markdown(f"""
             <div style='border:1px solid #ccc; border-radius:10px; padding:10px; margin-bottom:10px;'>
                 <strong>🗓️ 日期：</strong> {row.get('日期', '')}<br>
-                <strong>📌 今天你做了什麼 / What did you do today?：</strong> {row.get('今天你做了什麼', '')}<br>
-                <strong>🎯 今天有感覺的事 / What felt meaningful today?：</strong> {row.get('今天你有感覺的事', '')}<br>
+                <strong>📌 今天你做了什麼 / What did you do today?：</strong> {render_multiline(row.get('今天你做了什麼', ''))}<br>
+                <strong>🎯 今天有感覺的事 / What felt meaningful today?：</strong> {render_multiline(row.get('今天你有感覺的事', ''))}<br>
                 <strong>📊 今天整體感受 (1-10)：</strong> {row.get('今天整體感受', '')}/10<br>
-                <strong>🧠 是自主選擇嗎？/ Was it your choice?：</strong> {row.get('今天做的事，是自己選的嗎？', '')}<br>
-                <strong>🚫 今天最不想再來的事 / What you wouldn't repeat?：</strong> {row.get('今天最不想再來一次的事', '')}<br>
-                <strong>🌱 明天想做什麼 / Plans for tomorrow?：</strong> {row.get('明天你想做什麼', '')}<br>
+                <strong>🧠 是自主選擇嗎？/ Was it your choice?：</strong> {render_multiline(row.get('今天做的事，是自己選的嗎？', ''))}<br>
+                <strong>🚫 今天最不想再來的事 / What you wouldn't repeat?：</strong> {render_multiline(row.get('今天最不想再來一次的事', ''))}<br>
+                <strong>🌱 明天想做什麼 / Plans for tomorrow?：</strong> {render_multiline(row.get('明天你想做什麼', ''))}<br>
                 <strong>🏷️ 標籤 / Tags：</strong> {row.get('標籤', '')}
             </div>
             """, unsafe_allow_html=True)
