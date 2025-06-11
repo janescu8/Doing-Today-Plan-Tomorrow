@@ -219,7 +219,7 @@ elif export_option == "🔺 所有紀錄 / All Entries (All Users)":
         '使用者': 'User',
         '日期': 'Date',
         '今天你做了什麼': 'What did you do today?',
-        '今天有感覺的事': 'Meaningful Event',
+        '今天你有感覺的事': 'Meaningful Event',
         '今天整體感受': 'Mood',
         '今天做的事，是自己選的嗎？': 'Was it your choice?',
         '今天最不想再來一次的事': 'What you wouldn’t repeat',
