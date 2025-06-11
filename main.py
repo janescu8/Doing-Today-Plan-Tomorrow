@@ -154,6 +154,45 @@ if not user_data.empty:
             st.rerun()
 else:
     st.info("目前尚無可供編輯的紀錄。")
+    
+# --- 搜尋紀錄功能 / Search Entries ---
+st.markdown("---")
+st.subheader("🔍 搜尋紀錄 / Search Journal Entries")
+
+search_query = st.text_input("輸入關鍵字來搜尋所有紀錄 / Enter keyword to search all entries")
+
+if search_query:
+    try:
+        all_data = sheet.get_all_records()
+        search_df = pd.DataFrame(all_data)
+        search_df = search_df.fillna("")  # Handle NaN for searching
+
+        # 將所有欄位轉為字串並搜尋關鍵字
+        mask = search_df.apply(lambda row: row.astype(str).str.contains(search_query, case=False, na=False)).any(axis=1)
+        result_df = search_df[mask]
+
+        if not result_df.empty:
+            st.success(f"找到 {len(result_df)} 筆包含「{search_query}」的紀錄")
+            for index, row in result_df.iterrows():
+                st.markdown(f"""
+                <div style='border:1px solid #ccc; border-radius:10px; padding:10px; margin-bottom:10px;'>
+                    <strong>👤 使用者：</strong> {row.get('使用者', '')}<br>
+                    <strong>🗓️ 日期：</strong> {row.get('日期', '')}<br>
+                    <strong>📌 今天你做了什麼：</strong> {render_multiline(row.get('今天你做了什麼', ''))}<br>
+                    <strong>🎯 有感覺的事：</strong> {render_multiline(row.get('今天你有感覺的事', ''))}<br>
+                    <strong>📊 整體感受：</strong> {row.get('今天整體感受', '')}/10<br>
+                    <strong>🧠 自主選擇？：</strong> {render_multiline(row.get('今天做的事，是自己選的嗎？', ''))}<br>
+                    <strong>🚫 不想再來一次：</strong> {render_multiline(row.get('今天最不想再來一次的事', ''))}<br>
+                    <strong>🌱 明天計畫：</strong> {render_multiline(row.get('明天你想做什麼', ''))}<br>
+                    <strong>🏷️ 標籤：</strong> {row.get('標籤', '')}
+                </div>
+                """, unsafe_allow_html=True)
+        else:
+            st.info(f"沒有找到包含「{search_query}」的紀錄。")
+
+    except Exception as e:
+        st.error(f"搜尋時發生錯誤：{e}")
+
 
 # --- 匯出資料為 CSV ---
 st.markdown("---")
