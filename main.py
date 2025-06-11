@@ -58,7 +58,7 @@ overall_feeling = st.slider("📊 今天整體感受 (1-10)", 1, 10, 5)
 self_choice = st.text_area("🧠 是自主選擇嗎？/ Was it your choice?")
 dont_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?")
 plan_tomorrow = st.text_area("🌱 明天想做什麼 / Plans for tomorrow?")
-tags = st.text_input("🏷️ 標籤 / Tags (comma-separated)")
+tags = st.text_area("🏷️ 標籤 / Tags (comma-separated)")
 
 if st.button("提交 / Submit"):
     row = [user, today, doing_today, feeling_event, overall_feeling, self_choice, dont_repeat, plan_tomorrow, tags]
@@ -91,7 +91,7 @@ try:
                 <strong>🧠 是自主選擇嗎？/ Was it your choice?：</strong><br> {render_multiline(row.get('今天做的事，是自己選的嗎？', ''))}<br>
                 <strong>🚫 今天最不想再來的事 / What you wouldn't repeat?：</strong><br> {render_multiline(row.get('今天最不想再來一次的事', ''))}<br>
                 <strong>🌱 明天想做什麼 / Plans for tomorrow?：</strong><br> {render_multiline(row.get('明天你想做什麼', ''))}<br>
-                <strong>🏷️ 標籤 / Tags：</strong> {row.get('標籤', '')}
+                <strong>🏷️ 標籤 / Tags：</strong><br> {render_multiline(row.get('標籤', ''))}<br>
             </div>
             """, unsafe_allow_html=True)
 
@@ -144,7 +144,7 @@ if not user_data.empty:
         new_choice = st.text_area("🧠 是自主選擇嗎？/ Was it your choice?", record_to_edit.get('今天做的事，是自己選的嗎？', ''))
         new_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?", record_to_edit.get('今天最不想再來一次的事', ''))
         new_plan = st.text_area("🌱 明天想做什麼 / Plans for tomorrow?", record_to_edit.get('明天你想做什麼', ''))
-        new_tags = st.text_input("🏷️ 標籤 / Tags (comma-separated)", record_to_edit.get('標籤', ''))
+        new_tags = st.text_area("🏷️ 標籤 / Tags (comma-separated)", record_to_edit.get('標籤', ''))
 
         submitted = st.form_submit_button("更新紀錄 / Update Entry")
         if submitted:
