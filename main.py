@@ -176,15 +176,14 @@ if search_query:
             for index, row in result_df.iterrows():
                 st.markdown(f"""
                 <div style='border:1px solid #ccc; border-radius:10px; padding:10px; margin-bottom:10px;'>
-                    <strong>👤 使用者：</strong> {row.get('使用者', '')}<br>
                     <strong>🗓️ 日期：</strong> {row.get('日期', '')}<br>
-                    <strong>📌 今天你做了什麼：</strong> {render_multiline(row.get('今天你做了什麼', ''))}<br>
-                    <strong>🎯 有感覺的事：</strong> {render_multiline(row.get('今天你有感覺的事', ''))}<br>
-                    <strong>📊 整體感受：</strong> {row.get('今天整體感受', '')}/10<br>
-                    <strong>🧠 自主選擇？：</strong> {render_multiline(row.get('今天做的事，是自己選的嗎？', ''))}<br>
-                    <strong>🚫 不想再來一次：</strong> {render_multiline(row.get('今天最不想再來一次的事', ''))}<br>
-                    <strong>🌱 明天計畫：</strong> {render_multiline(row.get('明天你想做什麼', ''))}<br>
-                    <strong>🏷️ 標籤：</strong> {row.get('標籤', '')}
+                    <strong>📌 今天你做了什麼 / What did you do today?：</strong><br> {render_multiline(row.get('今天你做了什麼', ''))}<br>
+                    <strong>🎯 今天有感覺的事 / What felt meaningful today?：</strong><br> {render_multiline(row.get('今天你有感覺的事', ''))}<br>
+                    <strong>📊 今天整體感受 (1-10)：</strong> {row.get('今天整體感受', '')}/10<br>
+                    <strong>🧠 是自主選擇嗎？/ Was it your choice?：</strong><br> {render_multiline(row.get('今天做的事，是自己選的嗎？', ''))}<br>
+                    <strong>🚫 今天最不想再來的事 / What you wouldn't repeat?：</strong><br> {render_multiline(row.get('今天最不想再來一次的事', ''))}<br>
+                    <strong>🌱 明天想做什麼 / Plans for tomorrow?：</strong><br> {render_multiline(row.get('明天你想做什麼', ''))}<br>
+                    <strong>🏷️ 標籤 / Tags：</strong> {row.get('標籤', '')}
                 </div>
                 """, unsafe_allow_html=True)
         else:
