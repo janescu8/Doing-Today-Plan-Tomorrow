@@ -1,4 +1,5 @@
 
+import os
 import streamlit as st
 import datetime
 import gspread
@@ -7,6 +8,9 @@ import pandas as pd
 import matplotlib.pyplot as plt
 import matplotlib.dates as mdates
 import streamlit.components.v1 as components
+from wordcloud import WordCloud
+from io import BytesIO
+
 
 # --- Google Sheets Setup ---
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
@@ -236,4 +240,36 @@ st.download_button(
     file_name="journal_export.csv",
     mime='text/csv'
 )
+
+# Word Cloud Section
+st.markdown("---")
+st.subheader("☁️ 常見詞雲 / Frequent Words Cloud")
+
+# Build text content
+word_fields = ['今天你做了什麼', '今天你有感覺的事', '今天做的事，是自己選的嗎？', '今天最不想再來一次的事', '明天你想做什麼', '標籤']
+text_data = user_data[word_fields].fillna('').apply(lambda row: ' '.join(str(val) for val in row), axis=1).str.cat(sep=' ')
+
+# Font path (handles both local and Streamlit Cloud)
+font_path = os.path.join("assets", "NotoSansCJKtc-Regular.otf")
+
+# Check if font exists
+if os.path.exists(font_path):
+    try:
+        wordcloud = WordCloud(
+            width=800,
+            height=400,
+            background_color='white',
+            font_path=font_path,
+            collocations=False
+        ).generate(text_data)
+
+        fig, ax = plt.subplots(figsize=(10, 5))
+        ax.imshow(wordcloud, interpolation='bilinear')
+        ax.axis('off')
+        st.pyplot(fig)
+
+    except Exception as e:
+        st.warning(f"❗ 無法生成詞雲（Word Cloud）：{e}")
+else:
+    st.warning("⚠️ 無法找到中文字型，請確認 assets/NotoSansCJKtc-Regular.otf 是否存在。")
 
