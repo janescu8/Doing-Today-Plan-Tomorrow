@@ -1,5 +1,6 @@
 streamlit
 gspread
 pandas
-google-auth
 matplotlib
+wordcloud
+google-auth
