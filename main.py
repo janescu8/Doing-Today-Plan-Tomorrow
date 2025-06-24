@@ -247,7 +247,9 @@ st.subheader("☁️ 常見詞雲 / Frequent Words Cloud")
 
 # Build text content
 word_fields = ['今天你做了什麼', '今天你有感覺的事', '今天做的事，是自己選的嗎？', '今天最不想再來一次的事', '明天你想做什麼', '標籤']
-text_data = user_data[word_fields].fillna('').apply(lambda row: ' '.join(str(val) for val in row), axis=1).str.cat(sep=' ')
+all_data = sheet.get_all_records()
+all_df = pd.DataFrame(all_data)
+text_data = all_df[word_fields].fillna('').apply(lambda row: ' '.join(str(val) for val in row), axis=1).str.cat(sep=' ')
 
 # Font path (handles both local and Streamlit Cloud)
 font_path = os.path.join("assets", "NotoSansCJKtc-Regular.otf")
