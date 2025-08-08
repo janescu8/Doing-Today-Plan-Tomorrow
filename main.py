@@ -1,4 +1,4 @@
-# main.py — Diary app with separate Images/Audio/Videos tables, proxy media, history=5
+# main.py — Diary app with section navigator, proxy media, images/audio/videos split, history=5
 import os, io, uuid, time, sqlite3, datetime
 import streamlit as st
 import pandas as pd
@@ -96,31 +96,22 @@ def make_public_read(file_id: str):
         pass
 
 def upload_to_drive(file, user) -> str:
-    """Upload any file to attachments folder, return Drive fileId."""
     svc = drive_service()
     folder_id = st.secrets["google_drive"]["attachments_folder_id"]
     unique_name = f"{user}-{int(time.time())}-{file.name}"
     meta = {"name": unique_name, "parents": [folder_id]}
-
     tmp_path = f"/tmp/{unique_name}"
     with open(tmp_path, "wb") as fh:
         fh.write(file.getvalue())
-
     media = MediaFileUpload(tmp_path, mimetype=(file.type or "application/octet-stream"), resumable=False)
-    created = svc.files().create(
-        body=meta, media_body=media, fields="id", supportsAllDrives=True
-    ).execute()
-
+    created = svc.files().create(body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
     try: os.remove(tmp_path)
     except Exception: pass
-
     fid = created["id"]
-    # Not required for proxy, but nice if you ever share links directly
-    make_public_read(fid)
+    make_public_read(fid)  # not required for proxy, but nice if you ever share links
     return fid
 
 def public_view_url(file_id: str) -> str:
-    # For direct-mode; proxy mode doesn’t use this for display
     return f"https://drive.google.com/uc?export=download&id={file_id}"
 
 def drive_db_last_modified_rfc3339() -> str | None:
@@ -285,16 +276,12 @@ def load_entry_bundle(user, limit=5):
     entries = [dict(zip(cols, row)) for row in c.fetchall()]
     for e in entries:
         eid = e["id"]
-        # images
         c.execute("SELECT id, drive_file_id, mime FROM images WHERE entry_id=?", (eid,))
         e["images"] = [{"id": iid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (iid, fid, mime) in c.fetchall()]
-        # audio
         c.execute("SELECT id, drive_file_id, mime FROM audio WHERE entry_id=?", (eid,))
         e["audio"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (aid, fid, mime) in c.fetchall()]
-        # videos
         c.execute("SELECT id, drive_file_id, mime FROM videos WHERE entry_id=?", (eid,))
         e["videos"] = [{"id": vid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (vid, fid, mime) in c.fetchall()]
-        # tasks
         c.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (eid,))
         e["tasks"] = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
     conn.close(); return entries
@@ -396,73 +383,6 @@ def backfill_make_public(user: str | None = None):
     for fid in (img + aud + vid):
         make_public_read(fid)
 
-# ---------------------------- Smart search & LLM monthly ----------------------------
-def score_row(row, q_tokens, tag_tokens, mood_range, date_from, date_to):
-    score = 0
-    text_fields = " ".join([
-        str(row.get("what","")), str(row.get("meaningful","")),
-        str(row.get("plans","")), str(row.get("tags",""))
-    ]).lower()
-    for tok in q_tokens:
-        if tok in text_fields: score += 3
-    for t in tag_tokens:
-        if t in (row.get("tags","").lower()): score += 2
-    mood = row.get("mood", None)
-    if mood is not None:
-        try:
-            mood = int(mood)
-            if mood_range and (mood < mood_range[0] or mood > mood_range[1]):
-                return -1
-        except Exception:
-            pass
-    try:
-        d = datetime.datetime.strptime(row.get("date",""), "%Y-%m-%d").date()
-        if date_from and d < date_from: return -1
-        if date_to and d > date_to: return -1
-    except Exception:
-        pass
-    return score
-
-def llm_monthly_summary(user: str, year: int, month: int) -> str:
-    conn = get_conn()
-    start = datetime.date(year, month, 1)
-    end = (datetime.date(year+1,1,1)-datetime.timedelta(days=1)) if month==12 else (datetime.date(year,month+1,1)-datetime.timedelta(days=1))
-    df = pd.read_sql_query("""
-        SELECT date, what, meaningful, mood, tags FROM entries
-        WHERE user = ? AND date BETWEEN ? AND ?
-        ORDER BY date ASC
-    """, conn, params=(user, start.isoformat(), end.isoformat()))
-    conn.close()
-    if df.empty: return "No entries this month."
-    lines = []
-    for _, r in df.iterrows():
-        lines.append(f"{r['date']}: {str(r['what'] or '')} | Meaningful: {str(r['meaningful'] or '')} | Mood: {str(r['mood'] or '')} | Tags: {str(r['tags'] or '')}")
-    digest = "\n".join(lines)
-    if OPENAI_AVAILABLE:
-        try:
-            prompt = (
-                "Summarize the following daily diary lines into a monthly reflection. "
-                "Highlight patterns, wins, struggles, and 3 actionable suggestions for next month. "
-                "Keep it under 180 words.\n\n" + digest
-            )
-            resp = openai.ChatCompletion.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role":"system","content":"You are a helpful, concise coach."},
-                          {"role":"user","content": prompt}],
-                temperature=0.5,
-            )
-            return resp.choices[0].message["content"].strip()
-        except Exception:
-            pass
-    if LsaSummarizer is None: return digest[:1000]
-    try:
-        parser = PlaintextParser.from_string(digest, Tokenizer("english"))
-        summ = LsaSummarizer()
-        sents = summ(parser.document, 6)
-        return " ".join(str(s) for s in sents)
-    except Exception:
-        return digest[:1000]
-
 # ---------------------------- UI ----------------------------
 st.set_page_config(page_title="Sanny’s Diary", page_icon="🌀", layout="centered")
 st.title("🌀 迷惘但想搞懂的我 / Lost but Learning")
@@ -484,68 +404,61 @@ if drive_ts:
         if st.button("🔄 Sync latest diary from Drive"):
             if download_db(DB_PATH): st.success("Synced latest DB from Drive. Reloading…"); st.rerun()
 
-# Sidebar
+# ===== Sidebar: User + Jump =====
 user = st.sidebar.text_input("使用者 / User", value="Sanny")
-st.sidebar.info("資料永久保存：DB 與附件都在 Google Drive（媒體以代理模式顯示）。")
-with st.sidebar.expander("🔧 Fix attachments permissions"):
-    if st.button("Make my attachments public (anyone with link)"):
-        backfill_make_public(user); st.success("Done. Refreshing…"); st.rerun()
+SECTIONS = [
+    "New Entry",
+    "Recent Entries",
+    "Edit Past Entry",
+    "Search Results",
+    "Monthly Summary",
+    "Export",
+    "Settings",
+]
+section = st.sidebar.radio("🧭 Jump to", SECTIONS, index=0)
 
-st.sidebar.subheader("🔎 Smart Search")
-q = st.sidebar.text_input("Keywords (space-separated)")
-tag_query = st.sidebar.text_input("Filter tags (comma-separated)")
-mood_min, mood_max = st.sidebar.slider("Mood range", 1, 10, (1, 10))
-col1, col2 = st.sidebar.columns(2)
-date_from = col1.date_input("From", value=None)
-date_to = col2.date_input("To", value=None)
-use_proxy = st.sidebar.toggle("Use proxy mode for media", value=True, help="Recommended.")
+# ===== Sections =====
+if section == "New Entry":
+    today = datetime.date.today().strftime("%Y-%m-%d")
+    with st.form("new_entry"):
+        st.subheader("新增日記 / New Entry")
+        what = st.text_area("📌 今天你做了什麼 / What did you do today?", height=140)
+        meaningful = st.text_area("🎯 今天有感覺的事 / What felt meaningful today?")
+        mood = st.slider("📊 今天整體感受 (1-10)", 1, 10, 5)
+        choice = st.text_area("🧠 是自主選擇嗎？/ Was it your choice?")
+        no_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?")
+        plans = st.text_area("🌱 明天想做什麼（每行一個任務） / Plans for tomorrow (one per line)")
+        tags = st.text_input("🏷️ 標籤 / Tags (comma-separated)")
+        up_images = st.file_uploader("🖼️ Images", type=["png","jpg","jpeg","gif","bmp","webp"], accept_multiple_files=True)
+        up_audio  = st.file_uploader("🔊 Audio",  type=["mp3","wav","ogg","m4a","aac","flac"], accept_multiple_files=True)
+        up_videos = st.file_uploader("🎬 Videos", type=["mp4","webm","mov","mkv"], accept_multiple_files=True)
+        submitted = st.form_submit_button("提交 / Submit")
+        if submitted:
+            save_entry_to_db(user, today, what, meaningful, mood, choice, no_repeat, plans, tags,
+                             up_images, up_audio, up_videos)
+            st.success("已送出！資料與檔案已同步到 Google Drive ✅")
 
-today = datetime.date.today().strftime("%Y-%m-%d")
-with st.form("new_entry"):
-    st.subheader("新增日記 / New Entry")
-    what = st.text_area("📌 今天你做了什麼 / What did you do today?", height=140)
-    meaningful = st.text_area("🎯 今天有感覺的事 / What felt meaningful today?")
-    mood = st.slider("📊 今天整體感受 (1-10)", 1, 10, 5)
-    choice = st.text_area("🧠 是自主選擇嗎？/ Was it your choice?")
-    no_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?")
-    plans = st.text_area("🌱 明天想做什麼（每行一個任務） / Plans for tomorrow (one per line)")
-    tags = st.text_input("🏷️ 標籤 / Tags (comma-separated)")
+elif section == "Recent Entries":
+    st.subheader("📜 歷史紀錄（最近5筆） / Recent Entries")
+    entries = load_entry_bundle(user, limit=5)
+    if not entries:
+        st.info("尚無紀錄。")
+    else:
+        for e in entries:
+            st.markdown(f"**🗓️ {e['date']}** — **Mood:** {e['mood'] if e['mood'] is not None else '-'} /10")
+            st.markdown(f"**What:** {e['what'] or ''}")
+            if e["meaningful"]:
+                st.markdown(f"**Meaningful:** {e['meaningful']}")
 
-    up_images = st.file_uploader("🖼️ Images", type=["png","jpg","jpeg","gif","bmp","webp"], accept_multiple_files=True)
-    up_audio  = st.file_uploader("🔊 Audio", type=["mp3","wav","ogg","m4a","aac","flac"], accept_multiple_files=True)
-    up_videos = st.file_uploader("🎬 Videos", type=["mp4","webm","mov","mkv"], accept_multiple_files=True)
-
-    submitted = st.form_submit_button("提交 / Submit")
-    if submitted:
-        save_entry_to_db(user, today, what, meaningful, mood, choice, no_repeat, plans, tags,
-                         up_images, up_audio, up_videos)
-        st.success("已送出！資料與檔案已同步到 Google Drive ✅")
-
-st.divider(); st.subheader("📜 歷史紀錄（最近5筆） / Recent Entries")
-entries = load_entry_bundle(user, limit=5)
-if not entries:
-    st.info("尚無紀錄。")
-else:
-    for e in entries:
-        st.markdown(f"**🗓️ {e['date']}** — **Mood:** {e['mood'] if e['mood'] is not None else '-'} /10")
-        st.markdown(f"**What:** {e['what'] or ''}")
-        if e["meaningful"]: st.markdown(f"**Meaningful:** {e['meaningful']}")
-
-        # IMAGES
-        if e.get("images"):
-            st.write("**Images:**")
-            for a in e["images"]:
-                if use_proxy:
-                    data, mime = fetch_drive_bytes(a["file_id"])
+            if e.get("images"):
+                st.write("**Images:**")
+                for a in e["images"]:
+                    data, _ = fetch_drive_bytes(a["file_id"])
                     st.image(data, width=240)
-                else:
-                    st.image(a["url"], width=240)
 
-        # AUDIO
-        if e.get("audio"):
-            st.write("**Audio:**")
-            for a in e["audio"]:
-                if use_proxy:
+            if e.get("audio"):
+                st.write("**Audio:**")
+                for a in e["audio"]:
                     data, mime = fetch_drive_bytes(a["file_id"])
                     fmt = "audio/mpeg"
                     mime = (mime or "").lower()
@@ -553,155 +466,222 @@ else:
                     elif "wav" in mime: fmt = "audio/wav"
                     elif "ogg" in mime: fmt = "audio/ogg"
                     st.audio(data, format=fmt)
-                else:
-                    st.audio(a["url"])
 
-        # VIDEOS
-        if e.get("videos"):
-            st.write("**Videos:**")
-            for a in e["videos"]:
-                if use_proxy:
-                    data, mime = fetch_drive_bytes(a["file_id"])
-                    st.video(data)  # Streamlit will handle common formats
-                else:
-                    st.video(a["url"])
+            if e.get("videos"):
+                st.write("**Videos:**")
+                for a in e["videos"]:
+                    data, _ = fetch_drive_bytes(a["file_id"])
+                    st.video(data)
 
-        # Tasks
-        if e["tasks"]:
-            st.write("**Tomorrow’s Tasks:**")
-            for t in e["tasks"]:
-                new_val = st.checkbox(t["text"], value=t["is_done"], key=f"task-{t['id']}")
-                if new_val != t["is_done"]: update_task_done(t["id"], new_val)
+            if e["tasks"]:
+                st.write("**Tomorrow’s Tasks:**")
+                for t in e["tasks"]:
+                    new_val = st.checkbox(t["text"], value=t["is_done"], key=f"task-{t['id']}")
+                    if new_val != t["is_done"]:
+                        update_task_done(t["id"], new_val)
 
-        # Delete entry
-        if st.button("🗑️ 刪除這筆 / Delete this entry", key=f"del-entry-{e['id']}"):
-            delete_entry(e["id"]); st.success("Entry deleted."); st.rerun()
+            if st.button("🗑️ 刪除這筆 / Delete this entry", key=f"del-entry-{e['id']}"):
+                delete_entry(e["id"]); st.success("Entry deleted."); st.rerun()
 
-# Edit Past Entry
-st.divider(); st.subheader("✏️ 編輯過去日記 / Edit Past Entry")
-def entry_label(r): return f"{r['date']} | {str(r['what'] or '')[:40]}"
-opts = list_entries_for_user(user, limit=200)
-if opts.empty:
-    st.info("沒有可編輯的紀錄。")
-else:
-    opts["label"] = opts.apply(entry_label, axis=1)
-    chosen = st.selectbox("選擇要編輯的日記 / Select entry", opts["label"].tolist())
-    if chosen:
-        sel_id = opts.loc[opts["label"] == chosen, "id"].iloc[0]
-        entry = load_entry_detail(sel_id)
-        if entry:
-            with st.form("edit_entry_form", clear_on_submit=False):
-                new_date = st.text_input("日期 / Date (YYYY-MM-DD)", entry["date"])
-                new_what = st.text_area("What did you do today?", entry["what"] or "", height=140)
-                new_meaningful = st.text_area("Meaningful event", entry["meaningful"] or "")
-                new_mood = st.slider("Mood (1-10)", 1, 10, int(entry["mood"] or 5))
-                new_choice = st.text_area("Was it your choice?", entry["choice"] or "")
-                new_no_repeat = st.text_area("What you wouldn't repeat", entry["no_repeat"] or "")
-                existing_tasks = "\n".join([t["text"] for t in entry["tasks"]]) if entry["tasks"] else ""
-                new_plans = st.text_area("Plans for tomorrow (one per line)", existing_tasks)
-                new_tags = st.text_input("Tags (comma-separated)", entry["tags"] or "")
-
-                add_imgs = st.file_uploader("新增圖片 / Add images", type=["png","jpg","jpeg","gif","bmp","webp"], accept_multiple_files=True)
-                add_auds = st.file_uploader("新增音訊 / Add audio", type=["mp3","wav","ogg","m4a","aac","flac"], accept_multiple_files=True)
-                add_vids = st.file_uploader("新增影片 / Add videos", type=["mp4","webm","mov","mkv"], accept_multiple_files=True)
-
-                submitted_edit = st.form_submit_button("儲存變更 / Save changes")
-
-            # Existing media with delete
-            if entry.get("images"):
-                st.write("現有圖片 / Existing images:")
-                for a in entry["images"]:
-                    col1, col2 = st.columns([4,1])
-                    with col1:
-                        data, mime = fetch_drive_bytes(a["file_id"])
-                        st.image(data, width=220)
-                    with col2:
-                        if st.button("刪除 / Delete", key=f"del-img-{a['id']}"):
-                            delete_image(a["id"]); st.rerun()
-
-            if entry.get("audio"):
-                st.write("現有音訊 / Existing audio:")
-                for a in entry["audio"]:
-                    col1, col2 = st.columns([4,1])
-                    with col1:
-                        data, mime = fetch_drive_bytes(a["file_id"])
-                        fmt = "audio/mpeg"
-                        mime = (mime or "").lower()
-                        if "mp4" in mime or "aac" in mime or "m4a" in mime: fmt = "audio/mp4"
-                        elif "wav" in mime: fmt = "audio/wav"
-                        elif "ogg" in mime: fmt = "audio/ogg"
-                        st.audio(data, format=fmt)
-                    with col2:
-                        if st.button("刪除 / Delete", key=f"del-aud-{a['id']}"):
-                            delete_audio(a["id"]); st.rerun()
-
-            if entry.get("videos"):
-                st.write("現有影片 / Existing videos:")
-                for a in entry["videos"]:
-                    col1, col2 = st.columns([4,1])
-                    with col1:
-                        data, mime = fetch_drive_bytes(a["file_id"])
-                        st.video(data)
-                    with col2:
-                        if st.button("刪除 / Delete", key=f"del-vid-{a['id']}"):
-                            delete_video(a["id"]); st.rerun()
-
-            if submitted_edit:
-                summary = summarize_text(new_what)
-                update_entry(sel_id, {
-                    "date": new_date, "what": new_what, "meaningful": new_meaningful,
-                    "mood": int(new_mood), "choice": new_choice, "no_repeat": new_no_repeat,
-                    "plans": new_plans, "tags": ", ".join([t.strip() for t in (new_tags or '').split(',') if t.strip()]),
-                    "summary": summary
-                })
-                replace_tasks(sel_id, new_plans.split("\n") if new_plans else [])
-                add_images(sel_id, add_imgs, user)
-                add_audio(sel_id, add_auds, user)
-                add_videos(sel_id, add_vids, user)
-                st.success("已更新！DB 已同步到 Google Drive ✅"); st.rerun()
-
-# Smart Search results
-st.divider(); st.subheader("🔎 搜尋結果 / Search Results")
-conn = get_conn()
-df_all = pd.read_sql_query("SELECT * FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC", conn, params=(user,))
-conn.close()
-if df_all.empty:
-    st.info("無資料可搜尋。")
-else:
-    q_tokens = [t.strip().lower() for t in (q or "").split() if t.strip()]
-    tag_tokens = [t.strip().lower() for t in (tag_query or "").split(",") if t.strip()]
-    d_from = date_from if isinstance(date_from, datetime.date) else None
-    d_to = date_to if isinstance(date_to, datetime.date) else None
-    df_all["__score"] = df_all.apply(lambda r: score_row(r, q_tokens, tag_tokens, (mood_min, mood_max), d_from, d_to), axis=1)
-    res = df_all[df_all["__score"] >= 0].sort_values(["__score","date"], ascending=[False, False]).head(50)
-    if res.empty:
-        st.info("找不到符合的結果。")
+elif section == "Edit Past Entry":
+    st.subheader("✏️ 編輯過去日記 / Edit Past Entry")
+    def entry_label(r): return f"{r['date']} | {str(r['what'] or '')[:40]}"
+    opts = list_entries_for_user(user, limit=200)
+    if opts.empty:
+        st.info("沒有可編輯的紀錄。")
     else:
-        for _, r in res.iterrows():
-            st.markdown(f"**{r['date']}** — Mood: {r['mood'] if pd.notnull(r['mood']) else '-'}")
-            st.write((r["what"] or "")[:280])
-            if r.get("tags"): st.caption(f"Tags: {r['tags']}")
-            st.markdown("---")
+        opts["label"] = opts.apply(entry_label, axis=1)
+        chosen = st.selectbox("選擇要編輯的日記 / Select entry", opts["label"].tolist())
+        if chosen:
+            sel_id = opts.loc[opts["label"] == chosen, "id"].iloc[0]
+            entry = load_entry_detail(sel_id)
+            if entry:
+                with st.form("edit_entry_form", clear_on_submit=False):
+                    new_date = st.text_input("日期 / Date (YYYY-MM-DD)", entry["date"])
+                    new_what = st.text_area("What did you do today?", entry["what"] or "", height=140)
+                    new_meaningful = st.text_area("Meaningful event", entry["meaningful"] or "")
+                    new_mood = st.slider("Mood (1-10)", 1, 10, int(entry["mood"] or 5))
+                    new_choice = st.text_area("Was it your choice?", entry["choice"] or "")
+                    new_no_repeat = st.text_area("What you wouldn't repeat", entry["no_repeat"] or "")
+                    existing_tasks = "\n".join([t["text"] for t in entry["tasks"]]) if entry["tasks"] else ""
+                    new_plans = st.text_area("Plans for tomorrow (one per line)", existing_tasks)
+                    new_tags = st.text_input("Tags (comma-separated)", entry["tags"] or "")
+                    add_imgs = st.file_uploader("新增圖片 / Add images", type=["png","jpg","jpeg","gif","bmp","webp"], accept_multiple_files=True)
+                    add_auds = st.file_uploader("新增音訊 / Add audio", type=["mp3","wav","ogg","m4a","aac","flac"], accept_multiple_files=True)
+                    add_vids = st.file_uploader("新增影片 / Add videos", type=["mp4","webm","mov","mkv"], accept_multiple_files=True)
+                    submitted_edit = st.form_submit_button("儲存變更 / Save changes")
 
-# Monthly Summary
-st.divider(); st.subheader("🗓️ 每月總結 / Monthly Summary")
-coly, colm = st.columns(2)
-now = datetime.date.today()
-year = coly.number_input("Year", min_value=2000, max_value=2100, value=now.year, step=1)
-month = colm.number_input("Month", min_value=1, max_value=12, value=now.month, step=1)
-if st.button("Generate Monthly Summary"):
-    with st.spinner("Summarizing…"):
-        summary_text = llm_monthly_summary(user, int(year), int(month))
-    st.success("Done!")
-    st.write(summary_text)
+                if entry.get("images"):
+                    st.write("現有圖片 / Existing images:")
+                    for a in entry["images"]:
+                        col1, col2 = st.columns([4,1])
+                        with col1:
+                            data, _ = fetch_drive_bytes(a["file_id"])
+                            st.image(data, width=220)
+                        with col2:
+                            if st.button("刪除 / Delete", key=f"del-img-{a['id']}"):
+                                delete_image(a["id"]); st.rerun()
 
-# Export
-st.divider(); st.subheader("📤 匯出 / Export")
-exists = bool(list_entries_for_user(user, limit=1).shape[0])
-if exists:
+                if entry.get("audio"):
+                    st.write("現有音訊 / Existing audio:")
+                    for a in entry["audio"]:
+                        col1, col2 = st.columns([4,1])
+                        with col1:
+                            data, mime = fetch_drive_bytes(a["file_id"])
+                            fmt = "audio/mpeg"
+                            mime = (mime or "").lower()
+                            if "mp4" in mime or "aac" in mime or "m4a" in mime: fmt = "audio/mp4"
+                            elif "wav" in mime: fmt = "audio/wav"
+                            elif "ogg" in mime: fmt = "audio/ogg"
+                            st.audio(data, format=fmt)
+                        with col2:
+                            if st.button("刪除 / Delete", key=f"del-aud-{a['id']}"):
+                                delete_audio(a["id"]); st.rerun()
+
+                if entry.get("videos"):
+                    st.write("現有影片 / Existing videos:")
+                    for a in entry["videos"]:
+                        col1, col2 = st.columns([4,1])
+                        with col1:
+                            data, _ = fetch_drive_bytes(a["file_id"])
+                            st.video(data)
+                        with col2:
+                            if st.button("刪除 / Delete", key=f"del-vid-{a['id']}"):
+                                delete_video(a["id"]); st.rerun()
+
+                if submitted_edit:
+                    summary = summarize_text(new_what)
+                    update_entry(sel_id, {
+                        "date": new_date, "what": new_what, "meaningful": new_meaningful,
+                        "mood": int(new_mood), "choice": new_choice, "no_repeat": new_no_repeat,
+                        "plans": new_plans, "tags": ", ".join([t.strip() for t in (new_tags or '').split(',') if t.strip()]),
+                        "summary": summary
+                    })
+                    replace_tasks(sel_id, new_plans.split("\n") if new_plans else [])
+                    add_images(sel_id, add_imgs, user)
+                    add_audio(sel_id, add_auds, user)
+                    add_videos(sel_id, add_vids, user)
+                    st.success("已更新！DB 已同步到 Google Drive ✅"); st.rerun()
+
+elif section == "Search Results":
+    st.subheader("🔎 搜尋結果 / Search Results")
+    q = st.text_input("Keywords (space-separated)", key="q")
+    tag_query = st.text_input("Filter tags (comma-separated)", key="tags_q")
+    mood_min, mood_max = st.slider("Mood range", 1, 10, (1, 10), key="mood_q")
+    c1, c2 = st.columns(2)
+    date_from = c1.date_input("From", value=None, key="from_q")
+    date_to   = c2.date_input("To", value=None, key="to_q")
+
     conn = get_conn()
-    df = pd.read_sql_query("SELECT * FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC", conn, params=(user,))
+    df_all = pd.read_sql_query("SELECT * FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC", conn, params=(user,))
     conn.close()
-    st.download_button("下載 CSV (entries)", df.to_csv(index=False).encode("utf-8-sig"), file_name="entries.csv", mime="text/csv")
+    if df_all.empty:
+        st.info("無資料可搜尋。")
+    else:
+        def score_row(row, q_tokens, tag_tokens, mood_range, date_from, date_to):
+            score = 0
+            text_fields = " ".join([
+                str(row.get("what","")), str(row.get("meaningful","")),
+                str(row.get("plans","")), str(row.get("tags",""))
+            ]).lower()
+            for tok in q_tokens:
+                if tok in text_fields: score += 3
+            for t in tag_tokens:
+                if t in (row.get("tags","").lower()): score += 2
+            mood = row.get("mood", None)
+            if mood is not None:
+                try:
+                    mood = int(mood)
+                    if mood_range and (mood < mood_range[0] or mood > mood_range[1]):
+                        return -1
+                except Exception:
+                    pass
+            try:
+                d = datetime.datetime.strptime(row.get("date",""), "%Y-%m-%d").date()
+                if date_from and d < date_from: return -1
+                if date_to and d > date_to: return -1
+            except Exception:
+                pass
+            return score
 
-st.caption("Fresh schema with separate images/audio/videos tables. Media are proxied via the app to avoid Google Drive preview issues.")
+        q_tokens = [t.strip().lower() for t in (q or "").split() if t.strip()]
+        tag_tokens = [t.strip().lower() for t in (tag_query or "").split(",") if t.strip()]
+        d_from = date_from if isinstance(date_from, datetime.date) else None
+        d_to = date_to if isinstance(date_to, datetime.date) else None
+        df_all["__score"] = df_all.apply(lambda r: score_row(r, q_tokens, tag_tokens, (mood_min, mood_max), d_from, d_to), axis=1)
+        res = df_all[df_all["__score"] >= 0].sort_values(["__score","date"], ascending=[False, False]).head(50)
+        if res.empty:
+            st.info("找不到符合的結果。")
+        else:
+            for _, r in res.iterrows():
+                st.markdown(f"**{r['date']}** — Mood: {r['mood'] if pd.notnull(r['mood']) else '-'}")
+                st.write((r["what"] or "")[:280])
+                if r.get("tags"): st.caption(f"Tags: {r['tags']}")
+                st.markdown("---")
+
+elif section == "Monthly Summary":
+    st.subheader("🗓️ 每月總結 / Monthly Summary")
+    now = datetime.date.today()
+    coly, colm = st.columns(2)
+    year = coly.number_input("Year", min_value=2000, max_value=2100, value=now.year, step=1)
+    month = colm.number_input("Month", min_value=1, max_value=12, value=now.month, step=1)
+    if st.button("Generate Monthly Summary"):
+        def llm_monthly_summary(user: str, year: int, month: int) -> str:
+            conn = get_conn()
+            start = datetime.date(year, month, 1)
+            end = (datetime.date(year+1,1,1)-datetime.timedelta(days=1)) if month==12 else (datetime.date(year,month+1,1)-datetime.timedelta(days=1))
+            df = pd.read_sql_query("""
+                SELECT date, what, meaningful, mood, tags FROM entries
+                WHERE user = ? AND date BETWEEN ? AND ?
+                ORDER BY date ASC
+            """, conn, params=(user, start.isoformat(), end.isoformat()))
+            conn.close()
+            if df.empty: return "No entries this month."
+            lines = []
+            for _, r in df.iterrows():
+                lines.append(f"{r['date']}: {str(r['what'] or '')} | Meaningful: {str(r['meaningful'] or '')} | Mood: {str(r['mood'] or '')} | Tags: {str(r['tags'] or '')}")
+            digest = "\n".join(lines)
+            if OPENAI_AVAILABLE:
+                try:
+                    prompt = ("Summarize the following daily diary lines into a monthly reflection. "
+                              "Highlight patterns, wins, struggles, and 3 actionable suggestions for next month. "
+                              "Keep it under 180 words.\n\n" + digest)
+                    resp = openai.ChatCompletion.create(
+                        model="gpt-3.5-turbo",
+                        messages=[{"role":"system","content":"You are a helpful, concise coach."},
+                                  {"role":"user","content": prompt}],
+                        temperature=0.5,
+                    )
+                    return resp.choices[0].message["content"].strip()
+                except Exception:
+                    pass
+            if LsaSummarizer is None: return digest[:1000]
+            try:
+                parser = PlaintextParser.from_string(digest, Tokenizer("english"))
+                summ = LsaSummarizer()
+                sents = summ(parser.document, 6)
+                return " ".join(str(s) for s in sents)
+            except Exception:
+                return digest[:1000]
+
+        with st.spinner("Summarizing…"):
+            summary_text = llm_monthly_summary(user, int(year), int(month))
+        st.success("Done!")
+        st.write(summary_text)
+
+elif section == "Export":
+    st.subheader("📤 匯出 / Export")
+    exists = bool(list_entries_for_user(user, limit=1).shape[0])
+    if exists:
+        conn = get_conn()
+        df = pd.read_sql_query("SELECT * FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC", conn, params=(user,))
+        conn.close()
+        st.download_button("下載 CSV (entries)", df.to_csv(index=False).encode("utf-8-sig"), file_name="entries.csv", mime="text/csv")
+    else:
+        st.info("沒有資料可以匯出。")
+
+elif section == "Settings":
+    st.subheader("⚙️ Settings")
+    st.write("資料永久保存：DB 與附件都在 Google Drive（媒體以代理模式顯示）。")
+    if st.button("Make my attachments public (anyone with link)"):
+        backfill_make_public(user); st.success("Done.")
