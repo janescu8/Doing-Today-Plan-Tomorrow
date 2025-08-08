@@ -1,9 +1,9 @@
-# main_sql_drive.py
+# main.py
 import os, io, uuid, time, sqlite3, datetime
 import streamlit as st
 import pandas as pd
 
-# --- Optional summarizer (no external API) ---
+# --- Optional summarizer (no external LLM API) ---
 try:
     from sumy.summarizers.lsa import LsaSummarizer
     from sumy.parsers.plaintext import PlaintextParser
@@ -11,10 +11,10 @@ try:
 except Exception:
     LsaSummarizer = None
 
-# --- Google Drive client ---
+# --- Google Drive client (non-resumable uploads for Streamlit Cloud reliability) ---
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
-from googleapiclient.http import MediaIoBaseDownload, MediaIoBaseUpload
+from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 # ----------------------------
 # Secrets expected:
@@ -37,16 +37,28 @@ def drive_service():
     return build("drive", "v3", credentials=creds)
 
 def find_file_in_folder(svc, name, folder_id):
+    # Works for My Drive and Shared Drives
     q = f"name = '{name}' and '{folder_id}' in parents and trashed = false"
-    resp = svc.files().list(q=q, fields="files(id, name)").execute()
+    resp = svc.files().list(
+        q=q,
+        fields="files(id, name)",
+        includeItemsFromAllDrives=True,
+        supportsAllDrives=True,
+        corpora="allDrives",
+        spaces="drive",
+    ).execute()
     files = resp.get("files", [])
     return files[0] if files else None
 
-def download_db(local_path):
+def get_drive_db_file():
     svc = drive_service()
     folder_id = st.secrets["google_drive"]["db_folder_id"]
     fname = st.secrets["google_drive"]["db_filename"]
-    f = find_file_in_folder(svc, fname, folder_id)
+    return find_file_in_folder(svc, fname, folder_id)
+
+def download_db(local_path):
+    svc = drive_service()
+    f = get_drive_db_file()
     if not f:
         return False
     req = svc.files().get_media(fileId=f["id"])
@@ -63,12 +75,23 @@ def upload_db(local_path):
     fname = st.secrets["google_drive"]["db_filename"]
     f = find_file_in_folder(svc, fname, folder_id)
 
-    media = MediaIoBaseUpload(io.FileIO(local_path, "rb"), mimetype="application/octet-stream", resumable=True)
+    # SIMPLE upload (non-resumable) – avoids ResumableUploadError
+    media = MediaFileUpload(local_path, mimetype="application/octet-stream", resumable=False)
     file_meta = {"name": fname, "parents": [folder_id]}
+
     if f:
-        svc.files().update(fileId=f["id"], media_body=media).execute()
+        svc.files().update(
+            fileId=f["id"],
+            media_body=media,
+            supportsAllDrives=True,
+        ).execute()
     else:
-        svc.files().create(body=file_meta, media_body=media, fields="id").execute()
+        svc.files().create(
+            body=file_meta,
+            media_body=media,
+            fields="id",
+            supportsAllDrives=True,
+        ).execute()
 
 def upload_attachment(file, user) -> str:
     """Upload a file to Drive attachments folder, return fileId."""
@@ -76,13 +99,52 @@ def upload_attachment(file, user) -> str:
     folder_id = st.secrets["google_drive"]["attachments_folder_id"]
     unique_name = f"{user}-{int(time.time())}-{file.name}"
     file_meta = {"name": unique_name, "parents": [folder_id]}
-    media = MediaIoBaseUpload(io.BytesIO(file.getvalue()), mimetype=file.type or "application/octet-stream", resumable=True)
-    created = svc.files().create(body=file_meta, media_body=media, fields="id").execute()
+
+    # Save to temp then simple upload (reliable)
+    tmp_path = f"/tmp/{unique_name}"
+    with open(tmp_path, "wb") as fh:
+        fh.write(file.getvalue())
+
+    media = MediaFileUpload(tmp_path, mimetype=(file.type or "application/octet-stream"), resumable=False)
+    created = svc.files().create(
+        body=file_meta,
+        media_body=media,
+        fields="id",
+        supportsAllDrives=True,
+    ).execute()
+
+    try:
+        os.remove(tmp_path)
+    except Exception:
+        pass
     return created["id"]
 
 def public_view_url(file_id: str) -> str:
-    # For private apps you can manage permissions; this direct URL usually renders images.
+    # For private apps you can manage permissions; this direct URL usually renders images/audio.
     return f"https://drive.google.com/uc?id={file_id}"
+
+def drive_db_last_modified_rfc3339() -> str | None:
+    f = get_drive_db_file()
+    if not f:
+        return None
+    svc = drive_service()
+    meta = svc.files().get(fileId=f["id"], fields="modifiedTime").execute()
+    return meta.get("modifiedTime")  # e.g. '2025-08-08T06:22:36.000Z'
+
+def local_db_mtime_epoch() -> float | None:
+    try:
+        return os.path.getmtime(DB_PATH)
+    except FileNotFoundError:
+        return None
+
+def rfc3339_to_epoch(s: str) -> float:
+    from datetime import datetime, timezone
+    # 'YYYY-MM-DDTHH:MM:SS.sssZ'
+    s2 = s.replace('Z','')
+    # allow both ms and no-ms
+    fmt = "%Y-%m-%dT%H:%M:%S.%f" if '.' in s2 else "%Y-%m-%dT%H:%M:%S"
+    dt = datetime.datetime.strptime(s2, fmt)
+    return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
 
 # ----------------------------
 # DB bootstrap & helpers
@@ -176,6 +238,15 @@ def save_entry_to_db(user, date, what, meaningful, mood, choice, no_repeat, plan
     upload_db(DB_PATH)
     return entry_id
 
+def list_entries_for_user(user, limit=100):
+    conn = get_conn()
+    df = pd.read_sql_query(
+        "SELECT id, date, what FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC LIMIT ?",
+        conn, params=(user, limit)
+    )
+    conn.close()
+    return df
+
 def load_entry_bundle(user, limit=10):
     conn = get_conn()
     c = conn.cursor()
@@ -193,6 +264,69 @@ def load_entry_bundle(user, limit=10):
     conn.close()
     return entries
 
+def load_entry_detail(entry_id: str):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""SELECT id,user,date,what,meaningful,mood,choice,no_repeat,plans,tags,summary
+                 FROM entries WHERE id=?""", (entry_id,))
+    row = c.fetchone()
+    cols = [d[0] for d in c.description] if row else []
+    entry = dict(zip(cols, row)) if row else None
+    if entry:
+        c.execute("SELECT id, drive_file_id, mime FROM attachments WHERE entry_id=?", (entry_id,))
+        entry_attachments = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (aid, fid, mime) in c.fetchall()]
+        c.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (entry_id,))
+        entry_tasks = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
+        entry["attachments"] = entry_attachments
+        entry["tasks"] = entry_tasks
+    conn.close()
+    return entry
+
+def update_entry(entry_id: str, fields: dict):
+    keys = []
+    vals = []
+    for k, v in fields.items():
+        keys.append(f"{k}=?")
+        vals.append(v)
+    vals.append(entry_id)
+    conn = get_conn()
+    conn.execute(f"UPDATE entries SET {', '.join(keys)} WHERE id=?", vals)
+    conn.commit()
+    conn.close()
+    upload_db(DB_PATH)
+
+def delete_attachment(attachment_id: str):
+    conn = get_conn()
+    conn.execute("DELETE FROM attachments WHERE id=?", (attachment_id,))
+    conn.commit()
+    conn.close()
+    upload_db(DB_PATH)
+
+def add_attachments(entry_id: str, uploaded_files, user: str):
+    if not uploaded_files:
+        return
+    conn = get_conn()
+    c = conn.cursor()
+    for f in uploaded_files:
+        fid = upload_attachment(f, user)
+        c.execute("INSERT INTO attachments (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+    conn.commit()
+    conn.close()
+    upload_db(DB_PATH)
+
+def replace_tasks(entry_id: str, new_tasks: list[str]):
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("DELETE FROM tasks WHERE entry_id=?", (entry_id,))
+    for t in new_tasks:
+        if t.strip():
+            c.execute("INSERT INTO tasks (id, entry_id, text, is_done) VALUES (?,?,?,0)",
+                      (str(uuid.uuid4()), entry_id, t.strip()))
+    conn.commit()
+    conn.close()
+    upload_db(DB_PATH)
+
 def update_task_done(task_id: str, is_done: bool):
     conn = get_conn()
     conn.execute("UPDATE tasks SET is_done=? WHERE id=?", (1 if is_done else 0, task_id))
@@ -209,6 +343,24 @@ st.caption("SQLite stored in Google Drive • Attachments in Drive • Summaries
 
 ensure_db()
 
+# === UPDATE AVAILABLE BANNER ===
+def rfc3339_to_epoch_safe(s):
+    try:
+        return rfc3339_to_epoch(s)
+    except Exception:
+        return None
+
+drive_ts = drive_db_last_modified_rfc3339()
+local_ts = local_db_mtime_epoch()
+if drive_ts:
+    drive_epoch = rfc3339_to_epoch_safe(drive_ts)
+    if (drive_epoch is not None) and ((local_ts is None) or (drive_epoch > (local_ts + 2))):
+        st.warning("🔔 A newer diary database is available in Google Drive.")
+        if st.button("🔄 Sync latest diary from Drive"):
+            if download_db(DB_PATH):
+                st.success("Synced latest DB from Drive. Reloading…")
+                st.experimental_rerun()
+
 # Simple user selection (single-user friendly)
 user = st.sidebar.text_input("使用者 / User", value="Sanny")
 st.sidebar.info("資料永久保存：DB 與附件都存放在 Google Drive。")
@@ -223,7 +375,11 @@ with st.form("new_entry"):
     no_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?")
     plans = st.text_area("🌱 明天想做什麼（每行一個任務） / Plans for tomorrow (one per line)")
     tags = st.text_input("🏷️ 標籤 / Tags (comma-separated)")
-    uploaded_files = st.file_uploader("📎 附加檔案 / Attachments (image or audio)", accept_multiple_files=True)
+    uploaded_files = st.file_uploader(
+        "📎 附加檔案 / Attachments (image or audio)",
+        type=["png","jpg","jpeg","gif","bmp","webp","mp3","wav","ogg","m4a","aac","flac"],
+        accept_multiple_files=True
+    )
     submitted = st.form_submit_button("提交 / Submit")
     if submitted:
         save_entry_to_db(user, today, what, meaningful, mood, choice, no_repeat, plans, tags, uploaded_files)
@@ -248,10 +404,17 @@ else:
         if e["attachments"]:
             st.write("**Attachments:**")
             for a in e["attachments"]:
-                if (a["mime"] or "").startswith("image/"):
-                    st.image(a["url"], width=240)
-                elif (a["mime"] or "").startswith("audio/"):
-                    st.audio(a["url"])
+                mime = (a.get("mime") or "").lower()
+                url = a["url"]
+                ext = os.path.splitext(url.split("?")[0])[1].lower()
+                is_image = mime.startswith("image/") or ext in [".png",".jpg",".jpeg",".gif",".bmp",".webp"]
+                is_audio = mime.startswith("audio/") or ext in [".mp3",".wav",".ogg",".m4a",".aac",".flac"]
+                if is_image:
+                    st.image(url, width=240)
+                elif is_audio:
+                    st.audio(url)
+                else:
+                    st.write(url)
 
         # Tasks
         if e["tasks"]:
@@ -262,14 +425,76 @@ else:
                     update_task_done(t["id"], new_val)
 
 st.divider()
-st.subheader("📤 匯出 / Export")
+st.subheader("✏️ 編輯過去日記 / Edit Past Entry")
 
+options_df = list_entries_for_user(user, limit=200)
+if options_df.empty:
+    st.info("沒有可編輯的紀錄。")
+else:
+    options_df["label"] = options_df.apply(lambda r: f\"{r['date']} | {str(r['what'] or '')[:40]}\", axis=1)
+    selected_label = st.selectbox("選擇要編輯的日記 / Select entry", options_df["label"].tolist())
+    if selected_label:
+        sel_id = options_df.loc[options_df["label"] == selected_label, "id"].iloc[0]
+        entry = load_entry_detail(sel_id)
+        if entry:
+            with st.form("edit_entry_form", clear_on_submit=False):
+                new_date = st.text_input("日期 / Date (YYYY-MM-DD)", entry["date"])
+                new_what = st.text_area("What did you do today?", entry["what"] or "", height=140)
+                new_meaningful = st.text_area("Meaningful event", entry["meaningful"] or "")
+                new_mood = st.slider("Mood (1-10)", 1, 10, int(entry["mood"] or 5))
+                new_choice = st.text_area("Was it your choice?", entry["choice"] or "")
+                new_no_repeat = st.text_area("What you wouldn't repeat", entry["no_repeat"] or "")
+                existing_tasks = "\n".join([t["text"] for t in entry["tasks"]]) if entry["tasks"] else ""
+                new_plans = st.text_area("Plans for tomorrow (one per line)", existing_tasks)
+                new_tags = st.text_input("Tags (comma-separated)", entry["tags"] or "")
+                add_files = st.file_uploader("新增附件 / Add attachments (image/audio)",
+                                              type=["png","jpg","jpeg","gif","bmp","webp","mp3","wav","ogg","m4a","aac","flac"],
+                                              accept_multiple_files=True)
+                submitted_edit = st.form_submit_button("儲存變更 / Save changes")
+
+            if entry.get("attachments"):
+                st.write("現有附件 / Existing attachments:")
+                for a in entry["attachments"]:
+                    col1, col2 = st.columns([4,1])
+                    with col1:
+                        mime = (a.get("mime") or "").lower()
+                        if mime.startswith("image/"):
+                            st.image(a["url"], width=220)
+                        elif mime.startswith("audio/"):
+                            st.audio(a["url"])
+                        else:
+                            st.write(a["url"])
+                    with col2:
+                        if st.button("刪除 / Delete", key=f"del-{a['id']}"):
+                            delete_attachment(a["id"])
+                            st.experimental_rerun()
+
+            if submitted_edit:
+                summary = summarize_text(new_what)
+                update_entry(sel_id, {
+                    "date": new_date,
+                    "what": new_what,
+                    "meaningful": new_meaningful,
+                    "mood": int(new_mood),
+                    "choice": new_choice,
+                    "no_repeat": new_no_repeat,
+                    "plans": new_plans,
+                    "tags": ", ".join([t.strip() for t in (new_tags or '').split(',') if t.strip()]),
+                    "summary": summary
+                })
+                replace_tasks(sel_id, new_plans.split("\n") if new_plans else [])
+                add_attachments(sel_id, add_files, user)
+                st.success("已更新！DB 已同步到 Google Drive ✅")
+                st.experimental_rerun()
+
+st.divider()
+st.subheader("📤 匯出 / Export")
+entries = load_entry_bundle(user, limit=1)  # quick check for existence
 if entries:
-    # Basic CSV export (entries-only)
     conn = get_conn()
     df = pd.read_sql_query("SELECT * FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC", conn, params=(user,))
     conn.close()
     csv = df.to_csv(index=False).encode("utf-8-sig")
     st.download_button("下載 CSV (entries)", csv, file_name="entries.csv", mime="text/csv")
 
-st.caption("Note: For private images, manage Drive permissions. For multi-user editing, consider adding a simple lock or moving to Postgres.")
+st.caption("Note: Ensure both Drive folders are shared with your service account (Editor). For private images, manage Drive permissions.")
