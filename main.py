@@ -431,7 +431,7 @@ options_df = list_entries_for_user(user, limit=200)
 if options_df.empty:
     st.info("沒有可編輯的紀錄。")
 else:
-    options_df["label"] = options_df.apply(lambda r: f\"{r['date']} | {str(r['what'] or '')[:40]}\", axis=1)
+    options_df["label"] = options_df.apply(lambda r: f"{r['date']} | {str(r['what'] or '')[:40]}", axis=1)
     selected_label = st.selectbox("選擇要編輯的日記 / Select entry", options_df["label"].tolist())
     if selected_label:
         sel_id = options_df.loc[options_df["label"] == selected_label, "id"].iloc[0]
