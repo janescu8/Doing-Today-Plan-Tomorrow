@@ -1,5 +1,5 @@
-# main.py — Diary app with Delete, Smart Search, and LLM Monthly Summary (proxy media)
-import os, io, uuid, time, sqlite3, datetime, re
+# main.py — Diary app with separate Images/Audio/Videos tables, proxy media, history=5
+import os, io, uuid, time, sqlite3, datetime
 import streamlit as st
 import pandas as pd
 
@@ -11,11 +11,10 @@ try:
 except Exception:
     LsaSummarizer = None
 
-# --- Optional OpenAI LLM for monthly summary ---
+# --- Optional OpenAI LLM for monthly summary (fallback to sumy) ---
 OPENAI_AVAILABLE = False
 try:
     import openai
-    # Prefer key in st.secrets["openai"]["api_key"] or OPENAI_API_KEY env
     api_key = None
     if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
         api_key = st.secrets["openai"]["api_key"]
@@ -79,11 +78,11 @@ def upload_db(local_path):
     fname = st.secrets["google_drive"]["db_filename"]
     f = find_file_in_folder(svc, fname, folder_id)
     media = MediaFileUpload(local_path, mimetype="application/octet-stream", resumable=False)
-    file_meta = {"name": fname, "parents": [folder_id]}
+    meta = {"name": fname, "parents": [folder_id]}
     if f:
         svc.files().update(fileId=f["id"], media_body=media, supportsAllDrives=True).execute()
     else:
-        svc.files().create(body=file_meta, media_body=media, fields="id", supportsAllDrives=True).execute()
+        svc.files().create(body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
 
 def make_public_read(file_id: str):
     svc = drive_service()
@@ -96,40 +95,44 @@ def make_public_read(file_id: str):
     except Exception:
         pass
 
-def upload_attachment(file, user) -> str:
+def upload_to_drive(file, user) -> str:
+    """Upload any file to attachments folder, return Drive fileId."""
     svc = drive_service()
     folder_id = st.secrets["google_drive"]["attachments_folder_id"]
     unique_name = f"{user}-{int(time.time())}-{file.name}"
-    file_meta = {"name": unique_name, "parents": [folder_id]}
+    meta = {"name": unique_name, "parents": [folder_id]}
+
     tmp_path = f"/tmp/{unique_name}"
     with open(tmp_path, "wb") as fh:
         fh.write(file.getvalue())
+
     media = MediaFileUpload(tmp_path, mimetype=(file.type or "application/octet-stream"), resumable=False)
-    created = svc.files().create(body=file_meta, media_body=media, fields="id", supportsAllDrives=True).execute()
-    try:
-        os.remove(tmp_path)
-    except Exception:
-        pass
-    file_id = created["id"]
-    make_public_read(file_id)   # keep public so direct mode also works
-    return file_id
+    created = svc.files().create(
+        body=meta, media_body=media, fields="id", supportsAllDrives=True
+    ).execute()
+
+    try: os.remove(tmp_path)
+    except Exception: pass
+
+    fid = created["id"]
+    # Not required for proxy, but nice if you ever share links directly
+    make_public_read(fid)
+    return fid
 
 def public_view_url(file_id: str) -> str:
+    # For direct-mode; proxy mode doesn’t use this for display
     return f"https://drive.google.com/uc?export=download&id={file_id}"
 
 def drive_db_last_modified_rfc3339() -> str | None:
     f = get_drive_db_file()
-    if not f:
-        return None
+    if not f: return None
     svc = drive_service()
     meta = svc.files().get(fileId=f["id"], fields="modifiedTime").execute()
     return meta.get("modifiedTime")
 
 def local_db_mtime_epoch() -> float | None:
-    try:
-        return os.path.getmtime(DB_PATH)
-    except FileNotFoundError:
-        return None
+    try: return os.path.getmtime(DB_PATH)
+    except FileNotFoundError: return None
 
 def rfc3339_to_epoch(s: str) -> float:
     from datetime import timezone
@@ -138,9 +141,7 @@ def rfc3339_to_epoch(s: str) -> float:
     dt = datetime.datetime.strptime(s2, fmt)
     return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
 
-# ----------------------------
-# Proxy: fetch bytes from Drive (cached)
-# ----------------------------
+# -------- Proxy: fetch bytes from Drive (cached) --------
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_drive_bytes(file_id: str) -> tuple[bytes, str]:
     svc = drive_service()
@@ -155,10 +156,10 @@ def fetch_drive_bytes(file_id: str) -> tuple[bytes, str]:
     buf.seek(0)
     return buf.read(), mime
 
-# ----------------------------
-# DB bootstrap & helpers
-# ----------------------------
+# ---------------------------- DB ----------------------------
 SCHEMA_SQL = """
+PRAGMA foreign_keys = ON;
+
 CREATE TABLE IF NOT EXISTS entries (
   id TEXT PRIMARY KEY,
   user TEXT NOT NULL,
@@ -173,13 +174,31 @@ CREATE TABLE IF NOT EXISTS entries (
   summary TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
-CREATE TABLE IF NOT EXISTS attachments (
+
+CREATE TABLE IF NOT EXISTS images (
   id TEXT PRIMARY KEY,
   entry_id TEXT NOT NULL,
   drive_file_id TEXT NOT NULL,
   mime TEXT,
   FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
 );
+
+CREATE TABLE IF NOT EXISTS audio (
+  id TEXT PRIMARY KEY,
+  entry_id TEXT NOT NULL,
+  drive_file_id TEXT NOT NULL,
+  mime TEXT,
+  FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+);
+
+CREATE TABLE IF NOT EXISTS videos (
+  id TEXT PRIMARY KEY,
+  entry_id TEXT NOT NULL,
+  drive_file_id TEXT NOT NULL,
+  mime TEXT,
+  FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
+);
+
 CREATE TABLE IF NOT EXISTS tasks (
   id TEXT PRIMARY KEY,
   entry_id TEXT NOT NULL,
@@ -191,16 +210,16 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 def ensure_db():
     if not os.path.exists(DB_PATH):
-        downloaded = download_db(DB_PATH)
-        if not downloaded:
+        if not download_db(DB_PATH):
             conn = sqlite3.connect(DB_PATH)
             conn.executescript(SCHEMA_SQL)
-            conn.commit()
-            conn.close()
+            conn.commit(); conn.close()
             upload_db(DB_PATH)
 
 def get_conn():
-    return sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
+    conn.execute("PRAGMA foreign_keys = ON;")
+    return conn
 
 def summarize_text(text, max_sentences=2):
     if not text or not text.strip():
@@ -215,31 +234,39 @@ def summarize_text(text, max_sentences=2):
     except Exception:
         return text.split("\n")[0][:300]
 
-def save_entry_to_db(user, date, what, meaningful, mood, choice, no_repeat, plans, tags, uploaded_files):
+def save_entry_to_db(user, date, what, meaningful, mood, choice, no_repeat, plans, tags,
+                     uploaded_images, uploaded_audio, uploaded_videos):
     entry_id = str(uuid.uuid4())
     tags_str = ", ".join([t.strip() for t in (tags or "").split(",") if t.strip()])
     summary = summarize_text(what)
 
-    conn = get_conn()
-    c = conn.cursor()
+    conn = get_conn(); c = conn.cursor()
     c.execute("""INSERT INTO entries (id,user,date,what,meaningful,mood,choice,no_repeat,plans,tags,summary)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
               (entry_id, user, date, what, meaningful, int(mood) if mood else None, choice, no_repeat, plans, tags_str, summary))
 
-    for f in uploaded_files or []:
-        file_id = upload_attachment(f, user)
-        c.execute("""INSERT INTO attachments (id, entry_id, drive_file_id, mime)
-                     VALUES (?,?,?,?)""", (str(uuid.uuid4()), entry_id, file_id, f.type or ""))
+    for f in (uploaded_images or []):
+        fid = upload_to_drive(f, user)
+        c.execute("INSERT INTO images (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+
+    for f in (uploaded_audio or []):
+        fid = upload_to_drive(f, user)
+        c.execute("INSERT INTO audio (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+
+    for f in (uploaded_videos or []):
+        fid = upload_to_drive(f, user)
+        c.execute("INSERT INTO videos (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
 
     for line in (plans or "").split("\n"):
         t = line.strip()
         if t:
-            c.execute("""INSERT INTO tasks (id, entry_id, text, is_done) VALUES (?,?,?,0)""",
+            c.execute("INSERT INTO tasks (id, entry_id, text, is_done) VALUES (?,?,?,0)",
                       (str(uuid.uuid4()), entry_id, t))
 
-    conn.commit()
-    conn.close()
-    upload_db(DB_PATH)
+    conn.commit(); conn.close(); upload_db(DB_PATH)
     return entry_id
 
 def list_entries_for_user(user, limit=100):
@@ -248,44 +275,49 @@ def list_entries_for_user(user, limit=100):
         "SELECT id, date, what, meaningful, tags, mood FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC LIMIT ?",
         conn, params=(user, limit)
     )
-    conn.close()
-    return df
+    conn.close(); return df
 
-def load_entry_bundle(user, limit=10):
-    conn = get_conn()
-    c = conn.cursor()
-    c.execute("""SELECT id, user, date, what, meaningful, mood, choice, no_repeat, plans, tags, summary, created_at
+def load_entry_bundle(user, limit=5):
+    conn = get_conn(); c = conn.cursor()
+    c.execute("""SELECT id,user,date,what,meaningful,mood,choice,no_repeat,plans,tags,summary,created_at
                  FROM entries WHERE user=? ORDER BY date DESC, created_at DESC LIMIT ?""", (user, limit))
     cols = [d[0] for d in c.description]
     entries = [dict(zip(cols, row)) for row in c.fetchall()]
     for e in entries:
         eid = e["id"]
-        c.execute("SELECT id, drive_file_id, mime FROM attachments WHERE entry_id=?", (eid,))
-        e["attachments"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (aid, fid, mime) in c.fetchall()]
+        # images
+        c.execute("SELECT id, drive_file_id, mime FROM images WHERE entry_id=?", (eid,))
+        e["images"] = [{"id": iid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (iid, fid, mime) in c.fetchall()]
+        # audio
+        c.execute("SELECT id, drive_file_id, mime FROM audio WHERE entry_id=?", (eid,))
+        e["audio"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (aid, fid, mime) in c.fetchall()]
+        # videos
+        c.execute("SELECT id, drive_file_id, mime FROM videos WHERE entry_id=?", (eid,))
+        e["videos"] = [{"id": vid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (vid, fid, mime) in c.fetchall()]
+        # tasks
         c.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (eid,))
         e["tasks"] = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
-    conn.close()
-    return entries
+    conn.close(); return entries
 
 def load_entry_detail(entry_id: str):
-    conn = get_conn()
-    c = conn.cursor()
+    conn = get_conn(); c = conn.cursor()
     c.execute("""SELECT id,user,date,what,meaningful,mood,choice,no_repeat,plans,tags,summary FROM entries WHERE id=?""", (entry_id,))
     row = c.fetchone()
     cols = [d[0] for d in c.description] if row else []
     entry = dict(zip(cols, row)) if row else None
     if entry:
-        c.execute("SELECT id, drive_file_id, mime FROM attachments WHERE entry_id=?", (entry_id,))
-        entry_attachments = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (aid, fid, mime) in c.fetchall()]
+        c.execute("SELECT id, drive_file_id, mime FROM images WHERE entry_id=?", (entry_id,))
+        entry["images"] = [{"id": iid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (iid, fid, mime) in c.fetchall()]
+        c.execute("SELECT id, drive_file_id, mime FROM audio WHERE entry_id=?", (entry_id,))
+        entry["audio"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (aid, fid, mime) in c.fetchall()]
+        c.execute("SELECT id, drive_file_id, mime FROM videos WHERE entry_id=?", (entry_id,))
+        entry["videos"] = [{"id": vid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (vid, fid, mime) in c.fetchall()]
         c.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (entry_id,))
-        entry_tasks = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
-        entry["attachments"] = entry_attachments
-        entry["tasks"] = entry_tasks
-    conn.close()
-    return entry
+        entry["tasks"] = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
+    conn.close(); return entry
 
 def update_entry(entry_id: str, fields: dict):
-    keys = []; vals = []
+    keys, vals = [], []
     for k, v in fields.items():
         keys.append(f"{k}=?"); vals.append(v)
     vals.append(entry_id)
@@ -293,30 +325,49 @@ def update_entry(entry_id: str, fields: dict):
     conn.execute(f"UPDATE entries SET {', '.join(keys)} WHERE id=?", vals)
     conn.commit(); conn.close(); upload_db(DB_PATH)
 
-def delete_attachment(attachment_id: str):
-    conn = get_conn()
-    conn.execute("DELETE FROM attachments WHERE id=?", (attachment_id,))
-    conn.commit(); conn.close(); upload_db(DB_PATH)
+def delete_image(image_id: str):
+    conn = get_conn(); conn.execute("DELETE FROM images WHERE id=?", (image_id,)); conn.commit(); conn.close(); upload_db(DB_PATH)
+
+def delete_audio(audio_id: str):
+    conn = get_conn(); conn.execute("DELETE FROM audio WHERE id=?", (audio_id,)); conn.commit(); conn.close(); upload_db(DB_PATH)
+
+def delete_video(video_id: str):
+    conn = get_conn(); conn.execute("DELETE FROM videos WHERE id=?", (video_id,)); conn.commit(); conn.close(); upload_db(DB_PATH)
 
 def delete_entry(entry_id: str):
-    """Delete entry and its related tasks/attachments via foreign keys (ON DELETE CASCADE)."""
-    conn = get_conn()
-    conn.execute("DELETE FROM entries WHERE id=?", (entry_id,))
-    conn.commit(); conn.close(); upload_db(DB_PATH)
+    conn = get_conn(); conn.execute("DELETE FROM entries WHERE id=?", (entry_id,)); conn.commit(); conn.close(); upload_db(DB_PATH)
 
-def add_attachments(entry_id: str, uploaded_files, user: str):
+def add_images(entry_id: str, uploaded_files, user: str):
     if not uploaded_files: return
     conn = get_conn(); c = conn.cursor()
     for f in uploaded_files:
-        fid = upload_attachment(f, user)
-        c.execute("INSERT INTO attachments (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
+        fid = upload_to_drive(f, user)
+        c.execute("INSERT INTO images (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+    conn.commit(); conn.close(); upload_db(DB_PATH)
+
+def add_audio(entry_id: str, uploaded_files, user: str):
+    if not uploaded_files: return
+    conn = get_conn(); c = conn.cursor()
+    for f in uploaded_files:
+        fid = upload_to_drive(f, user)
+        c.execute("INSERT INTO audio (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+    conn.commit(); conn.close(); upload_db(DB_PATH)
+
+def add_videos(entry_id: str, uploaded_files, user: str):
+    if not uploaded_files: return
+    conn = get_conn(); c = conn.cursor()
+    for f in uploaded_files:
+        fid = upload_to_drive(f, user)
+        c.execute("INSERT INTO videos (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
                   (str(uuid.uuid4()), entry_id, fid, f.type or ""))
     conn.commit(); conn.close(); upload_db(DB_PATH)
 
 def replace_tasks(entry_id: str, new_tasks: list[str]):
     conn = get_conn(); c = conn.cursor()
     c.execute("DELETE FROM tasks WHERE entry_id=?", (entry_id,))
-    for t in new_tasks:
+    for t in (new_tasks or []):
         t = t.strip()
         if t:
             c.execute("INSERT INTO tasks (id, entry_id, text, is_done) VALUES (?,?,?,0)",
@@ -328,42 +379,42 @@ def update_task_done(task_id: str, is_done: bool):
     conn.execute("UPDATE tasks SET is_done=? WHERE id=?", (1 if is_done else 0, task_id))
     conn.commit(); conn.close(); upload_db(DB_PATH)
 
-def backfill_make_attachments_public(user: str | None = None):
+def backfill_make_public(user: str | None = None):
     conn = get_conn(); cur = conn.cursor()
     if user:
-        cur.execute("""SELECT a.drive_file_id FROM attachments a JOIN entries e ON e.id = a.entry_id WHERE e.user = ?""", (user,))
+        cur.execute("""SELECT i.drive_file_id FROM images i JOIN entries e ON e.id=i.entry_id WHERE e.user=?""", (user,))
+        img = [r[0] for r in cur.fetchall()]
+        cur.execute("""SELECT a.drive_file_id FROM audio a JOIN entries e ON e.id=a.entry_id WHERE e.user=?""", (user,))
+        aud = [r[0] for r in cur.fetchall()]
+        cur.execute("""SELECT v.drive_file_id FROM videos v JOIN entries e ON e.id=v.entry_id WHERE e.user=?""", (user,))
+        vid = [r[0] for r in cur.fetchall()]
     else:
-        cur.execute("SELECT drive_file_id FROM attachments")
-    rows = cur.fetchall(); conn.close()
-    for (fid,) in rows: make_public_read(fid)
+        cur.execute("SELECT drive_file_id FROM images"); img = [r[0] for r in cur.fetchall()]
+        cur.execute("SELECT drive_file_id FROM audio");  aud = [r[0] for r in cur.fetchall()]
+        cur.execute("SELECT drive_file_id FROM videos"); vid = [r[0] for r in cur.fetchall()]
+    conn.close()
+    for fid in (img + aud + vid):
+        make_public_read(fid)
 
-# ----------------------------
-# Smart Search Utilities
-# ----------------------------
+# ---------------------------- Smart search & LLM monthly ----------------------------
 def score_row(row, q_tokens, tag_tokens, mood_range, date_from, date_to):
     score = 0
     text_fields = " ".join([
         str(row.get("what","")), str(row.get("meaningful","")),
         str(row.get("plans","")), str(row.get("tags",""))
     ]).lower()
-    # keyword hits
     for tok in q_tokens:
-        if tok in text_fields:
-            score += 3
-    # tag hits
+        if tok in text_fields: score += 3
     for t in tag_tokens:
-        if t in (row.get("tags","").lower()):
-            score += 2
-    # mood filter
+        if t in (row.get("tags","").lower()): score += 2
     mood = row.get("mood", None)
     if mood is not None:
         try:
             mood = int(mood)
             if mood_range and (mood < mood_range[0] or mood > mood_range[1]):
-                return -1  # filtered out
+                return -1
         except Exception:
             pass
-    # date range
     try:
         d = datetime.datetime.strptime(row.get("date",""), "%Y-%m-%d").date()
         if date_from and d < date_from: return -1
@@ -372,41 +423,28 @@ def score_row(row, q_tokens, tag_tokens, mood_range, date_from, date_to):
         pass
     return score
 
-# ----------------------------
-# Monthly Summary (OpenAI if available; otherwise sumy)
-# ----------------------------
 def llm_monthly_summary(user: str, year: int, month: int) -> str:
     conn = get_conn()
     start = datetime.date(year, month, 1)
-    if month == 12:
-        end = datetime.date(year+1, 1, 1) - datetime.timedelta(days=1)
-    else:
-        end = datetime.date(year, month+1, 1) - datetime.timedelta(days=1)
+    end = (datetime.date(year+1,1,1)-datetime.timedelta(days=1)) if month==12 else (datetime.date(year,month+1,1)-datetime.timedelta(days=1))
     df = pd.read_sql_query("""
         SELECT date, what, meaningful, mood, tags FROM entries
         WHERE user = ? AND date BETWEEN ? AND ?
         ORDER BY date ASC
     """, conn, params=(user, start.isoformat(), end.isoformat()))
     conn.close()
-    if df.empty:
-        return "No entries this month."
-
-    # Build a compact plain text digest
+    if df.empty: return "No entries this month."
     lines = []
     for _, r in df.iterrows():
-        line = f"{r['date']}: {str(r['what'] or '')}  | Meaningful: {str(r['meaningful'] or '')}  | Mood: {str(r['mood'] or '')}  | Tags: {str(r['tags'] or '')}"
-        lines.append(line.strip())
+        lines.append(f"{r['date']}: {str(r['what'] or '')} | Meaningful: {str(r['meaningful'] or '')} | Mood: {str(r['mood'] or '')} | Tags: {str(r['tags'] or '')}")
     digest = "\n".join(lines)
-
-    # Try OpenAI if available
     if OPENAI_AVAILABLE:
         try:
             prompt = (
-                "Summarize the following daily diary lines into a monthly reflection for the user. "
+                "Summarize the following daily diary lines into a monthly reflection. "
                 "Highlight patterns, wins, struggles, and 3 actionable suggestions for next month. "
                 "Keep it under 180 words.\n\n" + digest
             )
-            # Using Chat Completions API (gpt-4o-mini or gpt-3.5-turbo substitute)
             resp = openai.ChatCompletion.create(
                 model="gpt-3.5-turbo",
                 messages=[{"role":"system","content":"You are a helpful, concise coach."},
@@ -414,26 +452,21 @@ def llm_monthly_summary(user: str, year: int, month: int) -> str:
                 temperature=0.5,
             )
             return resp.choices[0].message["content"].strip()
-        except Exception as e:
+        except Exception:
             pass
-
-    # Fallback to sumy style summary of the digest
-    if LsaSummarizer is None:
-        return digest[:1000]  # last-resort fallback
+    if LsaSummarizer is None: return digest[:1000]
     try:
         parser = PlaintextParser.from_string(digest, Tokenizer("english"))
         summ = LsaSummarizer()
-        sents = summ(parser.document, 6)  # ~6 sentences
+        sents = summ(parser.document, 6)
         return " ".join(str(s) for s in sents)
     except Exception:
         return digest[:1000]
 
-# ----------------------------
-# Streamlit UI
-# ----------------------------
+# ---------------------------- UI ----------------------------
 st.set_page_config(page_title="Sanny’s Diary", page_icon="🌀", layout="centered")
 st.title("🌀 迷惘但想搞懂的我 / Lost but Learning")
-st.caption("SQLite in Google Drive • Proxy media • Smart Search • Delete • LLM Monthly Summary")
+st.caption("SQLite in Google Drive • Proxy media • Images/Audio/Videos split • History=5 • Smart Search • LLM Monthly")
 
 ensure_db()
 
@@ -456,9 +489,8 @@ user = st.sidebar.text_input("使用者 / User", value="Sanny")
 st.sidebar.info("資料永久保存：DB 與附件都在 Google Drive（媒體以代理模式顯示）。")
 with st.sidebar.expander("🔧 Fix attachments permissions"):
     if st.button("Make my attachments public (anyone with link)"):
-        backfill_make_attachments_public(user); st.success("Done. Refreshing…"); st.rerun()
+        backfill_make_public(user); st.success("Done. Refreshing…"); st.rerun()
 
-# Smart Search controls
 st.sidebar.subheader("🔎 Smart Search")
 q = st.sidebar.text_input("Keywords (space-separated)")
 tag_query = st.sidebar.text_input("Filter tags (comma-separated)")
@@ -478,15 +510,19 @@ with st.form("new_entry"):
     no_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?")
     plans = st.text_area("🌱 明天想做什麼（每行一個任務） / Plans for tomorrow (one per line)")
     tags = st.text_input("🏷️ 標籤 / Tags (comma-separated)")
-    uploaded_files = st.file_uploader("📎 附加檔案 / Attachments (image or audio)",
-        type=["png","jpg","jpeg","gif","bmp","webp","mp3","wav","ogg","m4a","aac","flac"], accept_multiple_files=True)
+
+    up_images = st.file_uploader("🖼️ Images", type=["png","jpg","jpeg","gif","bmp","webp"], accept_multiple_files=True)
+    up_audio  = st.file_uploader("🔊 Audio", type=["mp3","wav","ogg","m4a","aac","flac"], accept_multiple_files=True)
+    up_videos = st.file_uploader("🎬 Videos", type=["mp4","webm","mov","mkv"], accept_multiple_files=True)
+
     submitted = st.form_submit_button("提交 / Submit")
     if submitted:
-        save_entry_to_db(user, today, what, meaningful, mood, choice, no_repeat, plans, tags, uploaded_files)
+        save_entry_to_db(user, today, what, meaningful, mood, choice, no_repeat, plans, tags,
+                         up_images, up_audio, up_videos)
         st.success("已送出！資料與檔案已同步到 Google Drive ✅")
 
-st.divider(); st.subheader("📜 歷史紀錄（最近10筆） / Recent Entries")
-entries = load_entry_bundle(user, limit=10)
+st.divider(); st.subheader("📜 歷史紀錄（最近5筆） / Recent Entries")
+entries = load_entry_bundle(user, limit=5)
 if not entries:
     st.info("尚無紀錄。")
 else:
@@ -497,32 +533,40 @@ else:
         if e["summary"]:
             with st.expander("🧾 Summary (auto)"): st.write(e["summary"])
 
-        if e["attachments"]:
-            st.write("**Attachments:**")
-            for a in e["attachments"]:
-                fid = a["file_id"]
+        # IMAGES
+        if e.get("images"):
+            st.write("**Images:**")
+            for a in e["images"]:
                 if use_proxy:
-                    data, mime = fetch_drive_bytes(fid)
-                    mime = (mime or a.get("mime") or "").lower()
-                    if mime.startswith("image/"):
-                        st.image(data, width=240)
-                    elif mime.startswith("audio/"):
-                        fmt = "audio/mpeg"
-                        if "mp4" in mime or "aac" in mime or "m4a" in mime: fmt = "audio/mp4"
-                        elif "wav" in mime: fmt = "audio/wav"
-                        elif "ogg" in mime: fmt = "audio/ogg"
-                        st.audio(data, format=fmt)
-                    else:
-                        st.download_button("Download attachment", data, file_name=f"{fid}", mime=mime or "application/octet-stream")
+                    data, mime = fetch_drive_bytes(a["file_id"])
+                    st.image(data, width=240)
                 else:
-                    url = a["url"]; mime = (a.get("mime") or "").lower()
-                    ext = os.path.splitext(url.split("?")[0])[1].lower()
-                    if mime.startswith("image/") or ext in [".png",".jpg",".jpeg",".gif",".bmp",".webp"]:
-                        st.image(url, width=240)
-                    elif mime.startswith("audio/") or ext in [".mp3",".wav",".ogg",".m4a",".aac",".flac"]:
-                        st.audio(url)
-                    else:
-                        st.write(url)
+                    st.image(a["url"], width=240)
+
+        # AUDIO
+        if e.get("audio"):
+            st.write("**Audio:**")
+            for a in e["audio"]:
+                if use_proxy:
+                    data, mime = fetch_drive_bytes(a["file_id"])
+                    fmt = "audio/mpeg"
+                    mime = (mime or "").lower()
+                    if "mp4" in mime or "aac" in mime or "m4a" in mime: fmt = "audio/mp4"
+                    elif "wav" in mime: fmt = "audio/wav"
+                    elif "ogg" in mime: fmt = "audio/ogg"
+                    st.audio(data, format=fmt)
+                else:
+                    st.audio(a["url"])
+
+        # VIDEOS
+        if e.get("videos"):
+            st.write("**Videos:**")
+            for a in e["videos"]:
+                if use_proxy:
+                    data, mime = fetch_drive_bytes(a["file_id"])
+                    st.video(data)  # Streamlit will handle common formats
+                else:
+                    st.video(a["url"])
 
         # Tasks
         if e["tasks"]:
@@ -531,11 +575,11 @@ else:
                 new_val = st.checkbox(t["text"], value=t["is_done"], key=f"task-{t['id']}")
                 if new_val != t["is_done"]: update_task_done(t["id"], new_val)
 
-        # 🔥 Delete entry button
+        # Delete entry
         if st.button("🗑️ 刪除這筆 / Delete this entry", key=f"del-entry-{e['id']}"):
             delete_entry(e["id"]); st.success("Entry deleted."); st.rerun()
 
-# ✏️ Edit Past Entry
+# Edit Past Entry
 st.divider(); st.subheader("✏️ 編輯過去日記 / Edit Past Entry")
 def entry_label(r): return f"{r['date']} | {str(r['what'] or '')[:40]}"
 opts = list_entries_for_user(user, limit=200)
@@ -558,29 +602,51 @@ else:
                 existing_tasks = "\n".join([t["text"] for t in entry["tasks"]]) if entry["tasks"] else ""
                 new_plans = st.text_area("Plans for tomorrow (one per line)", existing_tasks)
                 new_tags = st.text_input("Tags (comma-separated)", entry["tags"] or "")
-                add_files = st.file_uploader("新增附件 / Add attachments (image/audio)",
-                    type=["png","jpg","jpeg","gif","bmp","webp","mp3","wav","ogg","m4a","aac","flac"], accept_multiple_files=True)
+
+                add_imgs = st.file_uploader("新增圖片 / Add images", type=["png","jpg","jpeg","gif","bmp","webp"], accept_multiple_files=True)
+                add_auds = st.file_uploader("新增音訊 / Add audio", type=["mp3","wav","ogg","m4a","aac","flac"], accept_multiple_files=True)
+                add_vids = st.file_uploader("新增影片 / Add videos", type=["mp4","webm","mov","mkv"], accept_multiple_files=True)
+
                 submitted_edit = st.form_submit_button("儲存變更 / Save changes")
 
-            if entry.get("attachments"):
-                st.write("現有附件 / Existing attachments:")
-                for a in entry["attachments"]:
+            # Existing media with delete
+            if entry.get("images"):
+                st.write("現有圖片 / Existing images:")
+                for a in entry["images"]:
                     col1, col2 = st.columns([4,1])
                     with col1:
-                        fid = a["file_id"]
-                        data, mime = fetch_drive_bytes(fid)
-                        if (mime or "").startswith("image/"): st.image(data, width=220)
-                        elif (mime or "").startswith("audio/"):
-                            fmt = "audio/mpeg"
-                            if "mp4" in mime or "aac" in mime or "m4a" in mime: fmt = "audio/mp4"
-                            elif "wav" in mime: fmt = "audio/wav"
-                            elif "ogg" in mime: fmt = "audio/ogg"
-                            st.audio(data, format=fmt)
-                        else:
-                            st.download_button("Download", data, file_name=f"{fid}", mime=mime or "application/octet-stream")
+                        data, mime = fetch_drive_bytes(a["file_id"])
+                        st.image(data, width=220)
                     with col2:
-                        if st.button("刪除 / Delete", key=f"del-{a['id']}"):
-                            delete_attachment(a["id"]); st.rerun()
+                        if st.button("刪除 / Delete", key=f"del-img-{a['id']}"):
+                            delete_image(a["id"]); st.rerun()
+
+            if entry.get("audio"):
+                st.write("現有音訊 / Existing audio:")
+                for a in entry["audio"]:
+                    col1, col2 = st.columns([4,1])
+                    with col1:
+                        data, mime = fetch_drive_bytes(a["file_id"])
+                        fmt = "audio/mpeg"
+                        mime = (mime or "").lower()
+                        if "mp4" in mime or "aac" in mime or "m4a" in mime: fmt = "audio/mp4"
+                        elif "wav" in mime: fmt = "audio/wav"
+                        elif "ogg" in mime: fmt = "audio/ogg"
+                        st.audio(data, format=fmt)
+                    with col2:
+                        if st.button("刪除 / Delete", key=f"del-aud-{a['id']}"):
+                            delete_audio(a["id"]); st.rerun()
+
+            if entry.get("videos"):
+                st.write("現有影片 / Existing videos:")
+                for a in entry["videos"]:
+                    col1, col2 = st.columns([4,1])
+                    with col1:
+                        data, mime = fetch_drive_bytes(a["file_id"])
+                        st.video(data)
+                    with col2:
+                        if st.button("刪除 / Delete", key=f"del-vid-{a['id']}"):
+                            delete_video(a["id"]); st.rerun()
 
             if submitted_edit:
                 summary = summarize_text(new_what)
@@ -591,25 +657,23 @@ else:
                     "summary": summary
                 })
                 replace_tasks(sel_id, new_plans.split("\n") if new_plans else [])
-                add_attachments(sel_id, add_files, user)
+                add_images(sel_id, add_imgs, user)
+                add_audio(sel_id, add_auds, user)
+                add_videos(sel_id, add_vids, user)
                 st.success("已更新！DB 已同步到 Google Drive ✅"); st.rerun()
 
-# 🔎 Smart Search results
+# Smart Search results
 st.divider(); st.subheader("🔎 搜尋結果 / Search Results")
-# Pull larger slice for search
 conn = get_conn()
 df_all = pd.read_sql_query("SELECT * FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC", conn, params=(user,))
 conn.close()
 if df_all.empty:
     st.info("無資料可搜尋。")
 else:
-    # Prepare tokens
     q_tokens = [t.strip().lower() for t in (q or "").split() if t.strip()]
     tag_tokens = [t.strip().lower() for t in (tag_query or "").split(",") if t.strip()]
-    # Convert date widgets
     d_from = date_from if isinstance(date_from, datetime.date) else None
     d_to = date_to if isinstance(date_to, datetime.date) else None
-    # Score rows
     df_all["__score"] = df_all.apply(lambda r: score_row(r, q_tokens, tag_tokens, (mood_min, mood_max), d_from, d_to), axis=1)
     res = df_all[df_all["__score"] >= 0].sort_values(["__score","date"], ascending=[False, False]).head(50)
     if res.empty:
@@ -618,12 +682,10 @@ else:
         for _, r in res.iterrows():
             st.markdown(f"**{r['date']}** — Mood: {r['mood'] if pd.notnull(r['mood']) else '-'}")
             st.write((r["what"] or "")[:280])
-            # subtle tag display
-            if r.get("tags"):
-                st.caption(f"Tags: {r['tags']}")
+            if r.get("tags"): st.caption(f"Tags: {r['tags']}")
             st.markdown("---")
 
-# 📆 Monthly Summary (LLM if available)
+# Monthly Summary
 st.divider(); st.subheader("🗓️ 每月總結 / Monthly Summary")
 coly, colm = st.columns(2)
 now = datetime.date.today()
@@ -635,7 +697,7 @@ if st.button("Generate Monthly Summary"):
     st.success("Done!")
     st.write(summary_text)
 
-# 📤 Export
+# Export
 st.divider(); st.subheader("📤 匯出 / Export")
 exists = bool(list_entries_for_user(user, limit=1).shape[0])
 if exists:
@@ -644,4 +706,4 @@ if exists:
     conn.close()
     st.download_button("下載 CSV (entries)", df.to_csv(index=False).encode("utf-8-sig"), file_name="entries.csv", mime="text/csv")
 
-st.caption("Tip: For LLM monthly summary, add your OpenAI key to secrets as [openai].api_key. Fallback uses local summarizer.")
+st.caption("Fresh schema with separate images/audio/videos tables. Media are proxied via the app to avoid Google Drive preview issues.")
