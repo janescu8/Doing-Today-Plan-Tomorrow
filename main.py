@@ -1,9 +1,9 @@
-# main.py (proxy media mode)
-import os, io, uuid, time, sqlite3, datetime
+# main.py — Diary app with Delete, Smart Search, and LLM Monthly Summary (proxy media)
+import os, io, uuid, time, sqlite3, datetime, re
 import streamlit as st
 import pandas as pd
 
-# Summarizer (optional)
+# --- Optional summarizer (no external LLM) ---
 try:
     from sumy.summarizers.lsa import LsaSummarizer
     from sumy.parsers.plaintext import PlaintextParser
@@ -11,7 +11,23 @@ try:
 except Exception:
     LsaSummarizer = None
 
-# Google Drive API
+# --- Optional OpenAI LLM for monthly summary ---
+OPENAI_AVAILABLE = False
+try:
+    import openai
+    # Prefer key in st.secrets["openai"]["api_key"] or OPENAI_API_KEY env
+    api_key = None
+    if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
+        api_key = st.secrets["openai"]["api_key"]
+    elif os.getenv("OPENAI_API_KEY"):
+        api_key = os.getenv("OPENAI_API_KEY")
+    if api_key:
+        openai.api_key = api_key
+        OPENAI_AVAILABLE = True
+except Exception:
+    OPENAI_AVAILABLE = False
+
+# --- Google Drive client (non-resumable uploads for reliability) ---
 from google.oauth2.service_account import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
@@ -31,9 +47,10 @@ def drive_service():
 def find_file_in_folder(svc, name, folder_id):
     q = f"name = '{name}' and '{folder_id}' in parents and trashed = false"
     resp = svc.files().list(
-        q=q, fields="files(id,name)",
+        q=q, fields="files(id, name)",
         includeItemsFromAllDrives=True, supportsAllDrives=True,
-        corpora="allDrives", spaces="drive").execute()
+        corpora="allDrives", spaces="drive",
+    ).execute()
     files = resp.get("files", [])
     return files[0] if files else None
 
@@ -46,7 +63,8 @@ def get_drive_db_file():
 def download_db(local_path):
     svc = drive_service()
     f = get_drive_db_file()
-    if not f: return False
+    if not f:
+        return False
     req = svc.files().get_media(fileId=f["id"])
     with open(local_path, "wb") as fh:
         downloader = MediaIoBaseDownload(fh, req)
@@ -61,46 +79,57 @@ def upload_db(local_path):
     fname = st.secrets["google_drive"]["db_filename"]
     f = find_file_in_folder(svc, fname, folder_id)
     media = MediaFileUpload(local_path, mimetype="application/octet-stream", resumable=False)
-    meta = {"name": fname, "parents": [folder_id]}
+    file_meta = {"name": fname, "parents": [folder_id]}
     if f:
         svc.files().update(fileId=f["id"], media_body=media, supportsAllDrives=True).execute()
     else:
-        svc.files().create(body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
+        svc.files().create(body=file_meta, media_body=media, fields="id", supportsAllDrives=True).execute()
 
 def make_public_read(file_id: str):
     svc = drive_service()
     try:
-        svc.permissions().create(fileId=file_id, body={"type":"anyone","role":"reader"}, supportsAllDrives=True).execute()
-    except Exception: pass
+        svc.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"},
+            supportsAllDrives=True,
+        ).execute()
+    except Exception:
+        pass
 
 def upload_attachment(file, user) -> str:
     svc = drive_service()
     folder_id = st.secrets["google_drive"]["attachments_folder_id"]
-    unique = f"{user}-{int(time.time())}-{file.name}"
-    meta = {"name": unique, "parents": [folder_id]}
-    tmp = f"/tmp/{unique}"
-    with open(tmp, "wb") as fh: fh.write(file.getvalue())
-    media = MediaFileUpload(tmp, mimetype=(file.type or "application/octet-stream"), resumable=False)
-    created = svc.files().create(body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
-    try: os.remove(tmp)
-    except Exception: pass
-    fid = created["id"]
-    make_public_read(fid)  # not required for proxy, but nice for direct links
-    return fid
+    unique_name = f"{user}-{int(time.time())}-{file.name}"
+    file_meta = {"name": unique_name, "parents": [folder_id]}
+    tmp_path = f"/tmp/{unique_name}"
+    with open(tmp_path, "wb") as fh:
+        fh.write(file.getvalue())
+    media = MediaFileUpload(tmp_path, mimetype=(file.type or "application/octet-stream"), resumable=False)
+    created = svc.files().create(body=file_meta, media_body=media, fields="id", supportsAllDrives=True).execute()
+    try:
+        os.remove(tmp_path)
+    except Exception:
+        pass
+    file_id = created["id"]
+    make_public_read(file_id)   # keep public so direct mode also works
+    return file_id
 
 def public_view_url(file_id: str) -> str:
     return f"https://drive.google.com/uc?export=download&id={file_id}"
 
 def drive_db_last_modified_rfc3339() -> str | None:
     f = get_drive_db_file()
-    if not f: return None
+    if not f:
+        return None
     svc = drive_service()
     meta = svc.files().get(fileId=f["id"], fields="modifiedTime").execute()
     return meta.get("modifiedTime")
 
 def local_db_mtime_epoch() -> float | None:
-    try: return os.path.getmtime(DB_PATH)
-    except FileNotFoundError: return None
+    try:
+        return os.path.getmtime(DB_PATH)
+    except FileNotFoundError:
+        return None
 
 def rfc3339_to_epoch(s: str) -> float:
     from datetime import timezone
@@ -109,7 +138,9 @@ def rfc3339_to_epoch(s: str) -> float:
     dt = datetime.datetime.strptime(s2, fmt)
     return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
 
-# Proxy bytes (cached)
+# ----------------------------
+# Proxy: fetch bytes from Drive (cached)
+# ----------------------------
 @st.cache_data(show_spinner=False, ttl=3600)
 def fetch_drive_bytes(file_id: str) -> tuple[bytes, str]:
     svc = drive_service()
@@ -124,7 +155,9 @@ def fetch_drive_bytes(file_id: str) -> tuple[bytes, str]:
     buf.seek(0)
     return buf.read(), mime
 
-# DB
+# ----------------------------
+# DB bootstrap & helpers
+# ----------------------------
 SCHEMA_SQL = """
 CREATE TABLE IF NOT EXISTS entries (
   id TEXT PRIMARY KEY,
@@ -158,19 +191,26 @@ CREATE TABLE IF NOT EXISTS tasks (
 
 def ensure_db():
     if not os.path.exists(DB_PATH):
-        if not download_db(DB_PATH):
-            conn = sqlite3.connect(DB_PATH); conn.executescript(SCHEMA_SQL); conn.commit(); conn.close()
+        downloaded = download_db(DB_PATH)
+        if not downloaded:
+            conn = sqlite3.connect(DB_PATH)
+            conn.executescript(SCHEMA_SQL)
+            conn.commit()
+            conn.close()
             upload_db(DB_PATH)
 
 def get_conn():
     return sqlite3.connect(DB_PATH, check_same_thread=False)
 
 def summarize_text(text, max_sentences=2):
-    if not text or not text.strip(): return ""
-    if LsaSummarizer is None: return text.split("\n")[0][:300]
+    if not text or not text.strip():
+        return ""
+    if LsaSummarizer is None:
+        return text.split("\n")[0][:300]
     try:
         parser = PlaintextParser.from_string(text, Tokenizer("english"))
-        summ = LsaSummarizer(); sents = summ(parser.document, max_sentences)
+        summ = LsaSummarizer()
+        sents = summ(parser.document, max_sentences)
         return " ".join(str(s) for s in sents)
     except Exception:
         return text.split("\n")[0][:300]
@@ -179,59 +219,90 @@ def save_entry_to_db(user, date, what, meaningful, mood, choice, no_repeat, plan
     entry_id = str(uuid.uuid4())
     tags_str = ", ".join([t.strip() for t in (tags or "").split(",") if t.strip()])
     summary = summarize_text(what)
-    conn = get_conn(); c = conn.cursor()
+
+    conn = get_conn()
+    c = conn.cursor()
     c.execute("""INSERT INTO entries (id,user,date,what,meaningful,mood,choice,no_repeat,plans,tags,summary)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
               (entry_id, user, date, what, meaningful, int(mood) if mood else None, choice, no_repeat, plans, tags_str, summary))
+
     for f in uploaded_files or []:
-        fid = upload_attachment(f, user)
-        c.execute("""INSERT INTO attachments (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)""",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+        file_id = upload_attachment(f, user)
+        c.execute("""INSERT INTO attachments (id, entry_id, drive_file_id, mime)
+                     VALUES (?,?,?,?)""", (str(uuid.uuid4()), entry_id, file_id, f.type or ""))
+
     for line in (plans or "").split("\n"):
         t = line.strip()
         if t:
             c.execute("""INSERT INTO tasks (id, entry_id, text, is_done) VALUES (?,?,?,0)""",
                       (str(uuid.uuid4()), entry_id, t))
-    conn.commit(); conn.close(); upload_db(DB_PATH); return entry_id
+
+    conn.commit()
+    conn.close()
+    upload_db(DB_PATH)
+    return entry_id
 
 def list_entries_for_user(user, limit=100):
     conn = get_conn()
-    df = pd.read_sql_query("SELECT id, date, what FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC LIMIT ?",
-                           conn, params=(user, limit))
-    conn.close(); return df
+    df = pd.read_sql_query(
+        "SELECT id, date, what, meaningful, tags, mood FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC LIMIT ?",
+        conn, params=(user, limit)
+    )
+    conn.close()
+    return df
 
 def load_entry_bundle(user, limit=10):
-    conn = get_conn(); c = conn.cursor()
-    c.execute("""SELECT id,user,date,what,meaningful,mood,choice,no_repeat,plans,tags,summary,created_at
+    conn = get_conn()
+    c = conn.cursor()
+    c.execute("""SELECT id, user, date, what, meaningful, mood, choice, no_repeat, plans, tags, summary, created_at
                  FROM entries WHERE user=? ORDER BY date DESC, created_at DESC LIMIT ?""", (user, limit))
-    cols = [d[0] for d in c.description]; entries = [dict(zip(cols, row)) for row in c.fetchall()]
+    cols = [d[0] for d in c.description]
+    entries = [dict(zip(cols, row)) for row in c.fetchall()]
     for e in entries:
         eid = e["id"]
         c.execute("SELECT id, drive_file_id, mime FROM attachments WHERE entry_id=?", (eid,))
         e["attachments"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (aid, fid, mime) in c.fetchall()]
         c.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (eid,))
         e["tasks"] = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
-    conn.close(); return entries
+    conn.close()
+    return entries
 
 def load_entry_detail(entry_id: str):
-    conn = get_conn(); c = conn.cursor()
+    conn = get_conn()
+    c = conn.cursor()
     c.execute("""SELECT id,user,date,what,meaningful,mood,choice,no_repeat,plans,tags,summary FROM entries WHERE id=?""", (entry_id,))
-    row = c.fetchone(); cols = [d[0] for d in c.description] if row else []; entry = dict(zip(cols, row)) if row else None
+    row = c.fetchone()
+    cols = [d[0] for d in c.description] if row else []
+    entry = dict(zip(cols, row)) if row else None
     if entry:
         c.execute("SELECT id, drive_file_id, mime FROM attachments WHERE entry_id=?", (entry_id,))
-        entry["attachments"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (aid, fid, mime) in c.fetchall()]
+        entry_attachments = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (aid, fid, mime) in c.fetchall()]
         c.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (entry_id,))
-        entry["tasks"] = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
-    conn.close(); return entry
+        entry_tasks = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
+        entry["attachments"] = entry_attachments
+        entry["tasks"] = entry_tasks
+    conn.close()
+    return entry
 
 def update_entry(entry_id: str, fields: dict):
     keys = []; vals = []
-    for k,v in fields.items(): keys.append(f"{k}=?"); vals.append(v)
+    for k, v in fields.items():
+        keys.append(f"{k}=?"); vals.append(v)
     vals.append(entry_id)
-    conn = get_conn(); conn.execute(f"UPDATE entries SET {', '.join(keys)} WHERE id=?", vals); conn.commit(); conn.close(); upload_db(DB_PATH)
+    conn = get_conn()
+    conn.execute(f"UPDATE entries SET {', '.join(keys)} WHERE id=?", vals)
+    conn.commit(); conn.close(); upload_db(DB_PATH)
 
 def delete_attachment(attachment_id: str):
-    conn = get_conn(); conn.execute("DELETE FROM attachments WHERE id=?", (attachment_id,)); conn.commit(); conn.close(); upload_db(DB_PATH)
+    conn = get_conn()
+    conn.execute("DELETE FROM attachments WHERE id=?", (attachment_id,))
+    conn.commit(); conn.close(); upload_db(DB_PATH)
+
+def delete_entry(entry_id: str):
+    """Delete entry and its related tasks/attachments via foreign keys (ON DELETE CASCADE)."""
+    conn = get_conn()
+    conn.execute("DELETE FROM entries WHERE id=?", (entry_id,))
+    conn.commit(); conn.close(); upload_db(DB_PATH)
 
 def add_attachments(entry_id: str, uploaded_files, user: str):
     if not uploaded_files: return
@@ -253,7 +324,9 @@ def replace_tasks(entry_id: str, new_tasks: list[str]):
     conn.commit(); conn.close(); upload_db(DB_PATH)
 
 def update_task_done(task_id: str, is_done: bool):
-    conn = get_conn(); conn.execute("UPDATE tasks SET is_done=? WHERE id=?", (1 if is_done else 0, task_id)); conn.commit(); conn.close(); upload_db(DB_PATH)
+    conn = get_conn()
+    conn.execute("UPDATE tasks SET is_done=? WHERE id=?", (1 if is_done else 0, task_id))
+    conn.commit(); conn.close(); upload_db(DB_PATH)
 
 def backfill_make_attachments_public(user: str | None = None):
     conn = get_conn(); cur = conn.cursor()
@@ -264,10 +337,103 @@ def backfill_make_attachments_public(user: str | None = None):
     rows = cur.fetchall(); conn.close()
     for (fid,) in rows: make_public_read(fid)
 
-# UI
+# ----------------------------
+# Smart Search Utilities
+# ----------------------------
+def score_row(row, q_tokens, tag_tokens, mood_range, date_from, date_to):
+    score = 0
+    text_fields = " ".join([
+        str(row.get("what","")), str(row.get("meaningful","")),
+        str(row.get("plans","")), str(row.get("tags",""))
+    ]).lower()
+    # keyword hits
+    for tok in q_tokens:
+        if tok in text_fields:
+            score += 3
+    # tag hits
+    for t in tag_tokens:
+        if t in (row.get("tags","").lower()):
+            score += 2
+    # mood filter
+    mood = row.get("mood", None)
+    if mood is not None:
+        try:
+            mood = int(mood)
+            if mood_range and (mood < mood_range[0] or mood > mood_range[1]):
+                return -1  # filtered out
+        except Exception:
+            pass
+    # date range
+    try:
+        d = datetime.datetime.strptime(row.get("date",""), "%Y-%m-%d").date()
+        if date_from and d < date_from: return -1
+        if date_to and d > date_to: return -1
+    except Exception:
+        pass
+    return score
+
+# ----------------------------
+# Monthly Summary (OpenAI if available; otherwise sumy)
+# ----------------------------
+def llm_monthly_summary(user: str, year: int, month: int) -> str:
+    conn = get_conn()
+    start = datetime.date(year, month, 1)
+    if month == 12:
+        end = datetime.date(year+1, 1, 1) - datetime.timedelta(days=1)
+    else:
+        end = datetime.date(year, month+1, 1) - datetime.timedelta(days=1)
+    df = pd.read_sql_query("""
+        SELECT date, what, meaningful, mood, tags FROM entries
+        WHERE user = ? AND date BETWEEN ? AND ?
+        ORDER BY date ASC
+    """, conn, params=(user, start.isoformat(), end.isoformat()))
+    conn.close()
+    if df.empty:
+        return "No entries this month."
+
+    # Build a compact plain text digest
+    lines = []
+    for _, r in df.iterrows():
+        line = f"{r['date']}: {str(r['what'] or '')}  | Meaningful: {str(r['meaningful'] or '')}  | Mood: {str(r['mood'] or '')}  | Tags: {str(r['tags'] or '')}"
+        lines.append(line.strip())
+    digest = "\n".join(lines)
+
+    # Try OpenAI if available
+    if OPENAI_AVAILABLE:
+        try:
+            prompt = (
+                "Summarize the following daily diary lines into a monthly reflection for the user. "
+                "Highlight patterns, wins, struggles, and 3 actionable suggestions for next month. "
+                "Keep it under 180 words.\n\n" + digest
+            )
+            # Using Chat Completions API (gpt-4o-mini or gpt-3.5-turbo substitute)
+            resp = openai.ChatCompletion.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role":"system","content":"You are a helpful, concise coach."},
+                          {"role":"user","content": prompt}],
+                temperature=0.5,
+            )
+            return resp.choices[0].message["content"].strip()
+        except Exception as e:
+            pass
+
+    # Fallback to sumy style summary of the digest
+    if LsaSummarizer is None:
+        return digest[:1000]  # last-resort fallback
+    try:
+        parser = PlaintextParser.from_string(digest, Tokenizer("english"))
+        summ = LsaSummarizer()
+        sents = summ(parser.document, 6)  # ~6 sentences
+        return " ".join(str(s) for s in sents)
+    except Exception:
+        return digest[:1000]
+
+# ----------------------------
+# Streamlit UI
+# ----------------------------
 st.set_page_config(page_title="Sanny’s Diary", page_icon="🌀", layout="centered")
 st.title("🌀 迷惘但想搞懂的我 / Lost but Learning")
-st.caption("SQLite in Google Drive • Attachments proxied • Summaries via sumy")
+st.caption("SQLite in Google Drive • Proxy media • Smart Search • Delete • LLM Monthly Summary")
 
 ensure_db()
 
@@ -283,16 +449,24 @@ if drive_ts:
     if (drive_epoch is not None) and ((local_ts is None) or (drive_epoch > (local_ts + 2))):
         st.warning("🔔 A newer diary database is available in Google Drive.")
         if st.button("🔄 Sync latest diary from Drive"):
-            if download_db(DB_PATH):
-                st.success("Synced latest DB from Drive. Reloading…"); st.rerun()
+            if download_db(DB_PATH): st.success("Synced latest DB from Drive. Reloading…"); st.rerun()
 
+# Sidebar
 user = st.sidebar.text_input("使用者 / User", value="Sanny")
 st.sidebar.info("資料永久保存：DB 與附件都在 Google Drive（媒體以代理模式顯示）。")
 with st.sidebar.expander("🔧 Fix attachments permissions"):
     if st.button("Make my attachments public (anyone with link)"):
         backfill_make_attachments_public(user); st.success("Done. Refreshing…"); st.rerun()
 
-use_proxy = st.sidebar.toggle("Use proxy mode for media", value=True, help="Recommended. If off, links go directly to Drive.")
+# Smart Search controls
+st.sidebar.subheader("🔎 Smart Search")
+q = st.sidebar.text_input("Keywords (space-separated)")
+tag_query = st.sidebar.text_input("Filter tags (comma-separated)")
+mood_min, mood_max = st.sidebar.slider("Mood range", 1, 10, (1, 10))
+col1, col2 = st.sidebar.columns(2)
+date_from = col1.date_input("From", value=None)
+date_to = col2.date_input("To", value=None)
+use_proxy = st.sidebar.toggle("Use proxy mode for media", value=True, help="Recommended.")
 
 today = datetime.date.today().strftime("%Y-%m-%d")
 with st.form("new_entry"):
@@ -350,12 +524,18 @@ else:
                     else:
                         st.write(url)
 
+        # Tasks
         if e["tasks"]:
             st.write("**Tomorrow’s Tasks:**")
             for t in e["tasks"]:
                 new_val = st.checkbox(t["text"], value=t["is_done"], key=f"task-{t['id']}")
                 if new_val != t["is_done"]: update_task_done(t["id"], new_val)
 
+        # 🔥 Delete entry button
+        if st.button("🗑️ 刪除這筆 / Delete this entry", key=f"del-entry-{e['id']}"):
+            delete_entry(e["id"]); st.success("Entry deleted."); st.rerun()
+
+# ✏️ Edit Past Entry
 st.divider(); st.subheader("✏️ 編輯過去日記 / Edit Past Entry")
 def entry_label(r): return f"{r['date']} | {str(r['what'] or '')[:40]}"
 opts = list_entries_for_user(user, limit=200)
@@ -387,21 +567,17 @@ else:
                 for a in entry["attachments"]:
                     col1, col2 = st.columns([4,1])
                     with col1:
-                        fid = a["file_id"]; data, mime = fetch_drive_bytes(fid) if use_proxy else (None, (a.get("mime") or "").lower())
-                        if use_proxy and (mime or "").startswith("image/"): st.image(data, width=220)
-                        elif use_proxy and (mime or "").startswith("audio/"):
+                        fid = a["file_id"]
+                        data, mime = fetch_drive_bytes(fid)
+                        if (mime or "").startswith("image/"): st.image(data, width=220)
+                        elif (mime or "").startswith("audio/"):
                             fmt = "audio/mpeg"
                             if "mp4" in mime or "aac" in mime or "m4a" in mime: fmt = "audio/mp4"
                             elif "wav" in mime: fmt = "audio/wav"
                             elif "ogg" in mime: fmt = "audio/ogg"
                             st.audio(data, format=fmt)
-                        elif not use_proxy and (mime or "").startswith("image/"): st.image(a["url"], width=220)
-                        elif not use_proxy and (mime or "").startswith("audio/"): st.audio(a["url"])
                         else:
-                            if use_proxy and data is not None:
-                                st.download_button("Download", data, file_name=f"{fid}", mime=mime or "application/octet-stream")
-                            else:
-                                st.write(a["url"])
+                            st.download_button("Download", data, file_name=f"{fid}", mime=mime or "application/octet-stream")
                     with col2:
                         if st.button("刪除 / Delete", key=f"del-{a['id']}"):
                             delete_attachment(a["id"]); st.rerun()
@@ -418,13 +594,54 @@ else:
                 add_attachments(sel_id, add_files, user)
                 st.success("已更新！DB 已同步到 Google Drive ✅"); st.rerun()
 
+# 🔎 Smart Search results
+st.divider(); st.subheader("🔎 搜尋結果 / Search Results")
+# Pull larger slice for search
+conn = get_conn()
+df_all = pd.read_sql_query("SELECT * FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC", conn, params=(user,))
+conn.close()
+if df_all.empty:
+    st.info("無資料可搜尋。")
+else:
+    # Prepare tokens
+    q_tokens = [t.strip().lower() for t in (q or "").split() if t.strip()]
+    tag_tokens = [t.strip().lower() for t in (tag_query or "").split(",") if t.strip()]
+    # Convert date widgets
+    d_from = date_from if isinstance(date_from, datetime.date) else None
+    d_to = date_to if isinstance(date_to, datetime.date) else None
+    # Score rows
+    df_all["__score"] = df_all.apply(lambda r: score_row(r, q_tokens, tag_tokens, (mood_min, mood_max), d_from, d_to), axis=1)
+    res = df_all[df_all["__score"] >= 0].sort_values(["__score","date"], ascending=[False, False]).head(50)
+    if res.empty:
+        st.info("找不到符合的結果。")
+    else:
+        for _, r in res.iterrows():
+            st.markdown(f"**{r['date']}** — Mood: {r['mood'] if pd.notnull(r['mood']) else '-'}")
+            st.write((r["what"] or "")[:280])
+            # subtle tag display
+            if r.get("tags"):
+                st.caption(f"Tags: {r['tags']}")
+            st.markdown("---")
+
+# 📆 Monthly Summary (LLM if available)
+st.divider(); st.subheader("🗓️ 每月總結 / Monthly Summary")
+coly, colm = st.columns(2)
+now = datetime.date.today()
+year = coly.number_input("Year", min_value=2000, max_value=2100, value=now.year, step=1)
+month = colm.number_input("Month", min_value=1, max_value=12, value=now.month, step=1)
+if st.button("Generate Monthly Summary"):
+    with st.spinner("Summarizing…"):
+        summary_text = llm_monthly_summary(user, int(year), int(month))
+    st.success("Done!")
+    st.write(summary_text)
+
+# 📤 Export
 st.divider(); st.subheader("📤 匯出 / Export")
 exists = bool(list_entries_for_user(user, limit=1).shape[0])
 if exists:
     conn = get_conn()
     df = pd.read_sql_query("SELECT * FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC", conn, params=(user,))
     conn.close()
-    st.download_button("下載 CSV (entries)", df.to_csv(index=False).encode("utf-8-sig"),
-        file_name="entries.csv", mime="text/csv")
+    st.download_button("下載 CSV (entries)", df.to_csv(index=False).encode("utf-8-sig"), file_name="entries.csv", mime="text/csv")
 
-st.caption("Media are proxied via the app (recommended) so Google Drive headers don't break embeds. Toggle in sidebar if needed.")
+st.caption("Tip: For LLM monthly summary, add your OpenAI key to secrets as [openai].api_key. Fallback uses local summarizer.")
