@@ -9,6 +9,16 @@ import matplotlib.dates as mdates
 import streamlit.components.v1 as components
 from wordcloud import WordCloud
 from io import BytesIO
+# Summarization imports from sumy
+try:
+    # Use an extractive summarizer as a lightweight alternative to LLMs
+    from sumy.summarizers.lsa import LsaSummarizer
+    from sumy.parsers.plaintext import PlaintextParser
+    from sumy.nlp.tokenizers import Tokenizer
+except Exception:
+    # If sumy isn't available, define dummy summarizer
+    LsaSummarizer = None
+
 
 """
 Enhanced diary application for Sanny.
@@ -32,10 +42,37 @@ entries without Attachments will still load correctly.
 """
 
 ## Google Sheets Setup
+# Global variable to store the sheet header.  This is used later when
+# determining column indices for updating task statuses and summaries.
+HEADER_ROW: list = []
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_info(st.secrets["google_auth"], scopes=scope)
 client = gspread.authorize(creds)
 sheet = client.open("journal_export").sheet1
+
+# Ensure the Google Sheet has the required extra columns for task statuses and summaries.
+# Fetch the header row and append missing headers if necessary.  This prevents
+# runtime errors when reading/writing these fields later on.
+try:
+    header_row = sheet.row_values(1)
+    # Expose header for later use in updating task statuses
+    # Update the global HEADER_ROW in outer scope
+    HEADER_ROW = header_row.copy()
+    updated = False
+    # Add Task Statuses column if absent
+    if 'Task Statuses' not in header_row:
+        header_row.append('Task Statuses')
+        updated = True
+    # Add Summary column if absent
+    if 'Summary' not in header_row:
+        header_row.append('Summary')
+        updated = True
+    if updated:
+        # Update only the header row; gspread expects a 2D list
+        sheet.update('A1', [header_row])
+except Exception:
+    # If header retrieval fails (e.g. no sheet), silently proceed
+    pass
 
 ## Utility functions
 def render_multiline(text: str) -> str:
@@ -89,6 +126,44 @@ def save_attachments(user: str, date: str, uploaded_files) -> str:
     return ";".join(paths)
 
 
+def generate_summary(text: str, sentences: int = 2) -> str:
+    """
+    Generate a short summary from the provided text.  This uses the LSA summarizer
+    from the sumy library if available; otherwise it falls back to extracting the
+    first few sentences or returning the original text.  Summaries help
+    condense journal entries for quick review.
+
+    Parameters
+    ----------
+    text : str
+        The full text to summarize.
+    sentences : int, optional
+        The maximum number of sentences to include in the summary.
+
+    Returns
+    -------
+    str
+        A concise summary of the text.
+    """
+    if not isinstance(text, str) or not text.strip():
+        return ""
+    # Use the extractive summarizer when available
+    if LsaSummarizer is not None:
+        try:
+            parser = PlaintextParser.from_string(text, Tokenizer("english"))
+            summarizer = LsaSummarizer()
+            summary_sentences = summarizer(parser.document, sentences)
+            # Join the sentences into a single string
+            return " ".join(str(sent).strip() for sent in summary_sentences)
+        except Exception:
+            pass
+    # Fallback: return the first few sentences split by common delimiters
+    import re
+    sentence_list = re.split(r'[\n\.\!\?]+', text)
+    sentence_list = [s.strip() for s in sentence_list if s.strip()]
+    return " ".join(sentence_list[:sentences])
+
+
 ## Dynamic Users Setup
 try:
     raw_records = sheet.get_all_records()
@@ -138,9 +213,24 @@ tags = st.text_area("🏷️ 標籤 / Tags (comma-separated)")
 uploaded_files = st.file_uploader("📎 附加檔案 / Attachments (image or audio)", accept_multiple_files=True)
 
 if st.button("提交 / Submit"):
-    # Save attachments and get a string of file paths
+    # Save attachments and get a semicolon‑separated string of file paths
     attachments_str = save_attachments(user, today, uploaded_files)
-    row = [user, today, doing_today, feeling_event, overall_feeling, self_choice, dont_repeat, plan_tomorrow, tags, attachments_str]
+    # Determine tomorrow's tasks as a list (split by newline)
+    tasks_list = [t.strip() for t in plan_tomorrow.split("\n") if t.strip()]
+    # Initialize statuses: "0" means unchecked
+    statuses_str = ";".join(["0"] * len(tasks_list)) if tasks_list else ""
+    # Generate a summary of today's entry using the summarizer
+    summary_text = generate_summary("\n".join([
+        doing_today,
+        feeling_event,
+        self_choice,
+        dont_repeat,
+        plan_tomorrow
+    ]))
+    # Assemble the row for insertion.  Ensure the row matches the header length by
+    # including task statuses and summary as the last two fields.
+    row = [user, today, doing_today, feeling_event, overall_feeling, self_choice,
+           dont_repeat, plan_tomorrow, tags, attachments_str, statuses_str, summary_text]
     sheet.append_row(row)
     st.balloons()
     st.success("已送出！明天見🎉")
@@ -150,6 +240,10 @@ if st.button("提交 / Submit"):
 try:
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
+    # Guarantee presence of additional columns
+    for col in ['Task Statuses', 'Summary']:
+        if col not in df.columns:
+            df[col] = ''
 except Exception as e:
     st.error(f"讀取紀錄時發生錯誤：{e}")
     df = pd.DataFrame()
@@ -176,8 +270,24 @@ st.subheader("📜 歷史紀錄（最近10筆）")
 
 if not df.empty:
     df_user = df[df['User'] == user].copy()
-    # Parse tags into sets
+    # Keep track of the sheet row number (index + 2 because header occupies row 1)
+    df_user['_row_number'] = df_user.index + 2
+    # Parse tags into sets for filtering
     df_user['TagList'] = df_user['Tags'].fillna('').apply(lambda t: [tag.strip() for tag in t.split(',') if tag.strip()])
+    # Parse tasks and statuses
+    def parse_tasks_and_statuses(plans: str, statuses: str):
+        tasks_list = [t.strip() for t in plans.split('\n') if t.strip()]
+        status_list = [s.strip() for s in statuses.split(';') if s.strip()]
+        # Align status list length with tasks; default to '0' (unchecked)
+        if len(status_list) < len(tasks_list):
+            status_list += ['0'] * (len(tasks_list) - len(status_list))
+        elif len(status_list) > len(tasks_list):
+            status_list = status_list[:len(tasks_list)]
+        bool_status = [s == '1' for s in status_list]
+        return tasks_list, bool_status
+    df_user[['TaskList', 'TaskStatusList']] = df_user.apply(
+        lambda r: parse_tasks_and_statuses(r.get('Plans for tomorrow', ''), r.get('Task Statuses', '')), axis=1, result_type='expand'
+    )
     # Build unique tag options
     unique_tags = sorted({tag for tags_list in df_user['TagList'] for tag in tags_list})
     selected_tags = st.multiselect("選擇標籤過濾 / Filter by tags", options=unique_tags)
@@ -185,6 +295,7 @@ if not df.empty:
         df_user = df_user[df_user['TagList'].apply(lambda tags_list: any(tag in tags_list for tag in selected_tags))]
     # Limit to last 10 entries
     df_user = df_user.sort_values('Date').tail(10)
+    # Display each entry
     for idx, row in df_user.iterrows():
         sentiment = sentiment_score(row.get('What did you do today?', ''))
         sentiment_label = {1: 'Positive', -1: 'Negative', 0: 'Neutral'}.get(sentiment, 'Neutral')
@@ -209,11 +320,46 @@ if not df.empty:
                 elif fpath.lower().endswith(('.mp3', '.wav', '.ogg')) and os.path.exists(fpath):
                     st.audio(fpath)
         # Display tomorrow's plans as checkboxes (habit/task management)
-        tasks = [task.strip() for task in row.get('Plans for tomorrow', '').split('\n') if task.strip()]
+        tasks = row['TaskList'] if isinstance(row['TaskList'], list) else []
+        statuses = row['TaskStatusList'] if isinstance(row['TaskStatusList'], list) else []
         if tasks:
             st.write("**Tomorrow's Tasks:**")
-            for t in tasks:
-                st.checkbox(t, key=f"task-{idx}-{t}")
+            for i, t in enumerate(tasks):
+                st.checkbox(
+                    t,
+                    value=statuses[i] if i < len(statuses) else False,
+                    key=f"task-{row['_row_number']}-{i}"
+                )
+        # Display summary if available
+        if row.get('Summary'):
+            st.write(f"**摘要 / Summary:** {render_multiline(row['Summary'])}")
+
+    # Provide a button to persist task statuses back to the sheet
+    if not df_user.empty and st.button("💾 保存任務狀態 / Save Task Statuses"):
+        # Iterate over displayed entries and record the checkbox states
+        for _, row in df_user.iterrows():
+            tasks = row['TaskList'] if isinstance(row['TaskList'], list) else []
+            # Build a list of "1"/"0" strings representing checked/unchecked
+            statuses_list = []
+            for i, _ in enumerate(tasks):
+                key = f"task-{row['_row_number']}-{i}"
+                checked = st.session_state.get(key, False)
+                statuses_list.append('1' if checked else '0')
+            statuses_str = ';'.join(statuses_list)
+            # Update in-memory DataFrame
+            df.loc[row.name, 'Task Statuses'] = statuses_str
+            # Update the sheet cell
+            try:
+                row_number = row['_row_number']
+                # Determine column index for Task Statuses
+                if 'Task Statuses' in HEADER_ROW:
+                    col_idx = HEADER_ROW.index('Task Statuses') + 1
+                else:
+                    col_idx = len(HEADER_ROW) + 1
+                sheet.update_cell(row_number, col_idx, statuses_str)
+            except Exception as e:
+                st.error(f"更新任務狀態時發生錯誤：{e}")
+        st.success("任務狀態已儲存！")
 
     # Visual analytics – weekly mood bar chart
     st.markdown("---")
