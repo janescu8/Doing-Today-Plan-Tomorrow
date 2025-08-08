@@ -1,6 +1,7 @@
 streamlit
-gspread
 pandas
-matplotlib
-wordcloud
+sumy
+google-api-python-client
 google-auth
+google-auth-httplib2
+google-auth-oauthlib
