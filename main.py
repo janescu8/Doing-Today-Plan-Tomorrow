@@ -93,8 +93,21 @@ def upload_db(local_path):
             supportsAllDrives=True,
         ).execute()
 
+def make_public_read(file_id: str):
+    """Grant 'anyone with the link' read access so media renders in the browser."""
+    svc = drive_service()
+    try:
+        svc.permissions().create(
+            fileId=file_id,
+            body={"type": "anyone", "role": "reader"},
+            supportsAllDrives=True,
+        ).execute()
+    except Exception:
+        # Ignore if permission already exists or org policy blocks it
+        pass
+
 def upload_attachment(file, user) -> str:
-    """Upload a file to Drive attachments folder, return fileId."""
+    """Upload a file to Drive attachments folder, return fileId (and make it public-read)."""
     svc = drive_service()
     folder_id = st.secrets["google_drive"]["attachments_folder_id"]
     unique_name = f"{user}-{int(time.time())}-{file.name}"
@@ -117,11 +130,14 @@ def upload_attachment(file, user) -> str:
         os.remove(tmp_path)
     except Exception:
         pass
-    return created["id"]
+
+    file_id = created["id"]
+    make_public_read(file_id)   # ensure browser can load it
+    return file_id
 
 def public_view_url(file_id: str) -> str:
-    # For private apps you can manage permissions; this direct URL usually renders images/audio.
-    return f"https://drive.google.com/uc?id={file_id}"
+    # “export=download” avoids some Drive preview quirks and streams cleanly
+    return f"https://drive.google.com/uc?export=download&id={file_id}"
 
 def drive_db_last_modified_rfc3339() -> str | None:
     f = get_drive_db_file()
@@ -138,10 +154,9 @@ def local_db_mtime_epoch() -> float | None:
         return None
 
 def rfc3339_to_epoch(s: str) -> float:
-    from datetime import datetime, timezone
-    # 'YYYY-MM-DDTHH:MM:SS.sssZ'
+    from datetime import timezone
+    # 'YYYY-MM-DDTHH:MM:SS.sssZ' or without ms
     s2 = s.replace('Z','')
-    # allow both ms and no-ms
     fmt = "%Y-%m-%dT%H:%M:%S.%f" if '.' in s2 else "%Y-%m-%dT%H:%M:%S"
     dt = datetime.datetime.strptime(s2, fmt)
     return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
@@ -334,12 +349,29 @@ def update_task_done(task_id: str, is_done: bool):
     conn.close()
     upload_db(DB_PATH)
 
+def backfill_make_attachments_public(user: str | None = None):
+    """Give public-read to all existing attachment files (useful after switching policy)."""
+    conn = get_conn()
+    cur = conn.cursor()
+    if user:
+        cur.execute("""
+            SELECT a.drive_file_id FROM attachments a
+            JOIN entries e ON e.id = a.entry_id
+            WHERE e.user = ?
+        """, (user,))
+    else:
+        cur.execute("SELECT drive_file_id FROM attachments")
+    rows = cur.fetchall()
+    conn.close()
+    for (fid,) in rows:
+        make_public_read(fid)
+
 # ----------------------------
 # Streamlit UI
 # ----------------------------
 st.set_page_config(page_title="Sanny’s Diary", page_icon="🌀", layout="centered")
 st.title("🌀 迷惘但想搞懂的我 / Lost but Learning")
-st.caption("SQLite stored in Google Drive • Attachments in Drive • Summaries via sumy")
+st.caption("SQLite stored in Google Drive • Attachments in Drive (public link) • Summaries via sumy")
 
 ensure_db()
 
@@ -359,11 +391,17 @@ if drive_ts:
         if st.button("🔄 Sync latest diary from Drive"):
             if download_db(DB_PATH):
                 st.success("Synced latest DB from Drive. Reloading…")
-                st.experimental_rerun()
+                st.rerun()
 
-# Simple user selection (single-user friendly)
+# Sidebar utilities
 user = st.sidebar.text_input("使用者 / User", value="Sanny")
-st.sidebar.info("資料永久保存：DB 與附件都存放在 Google Drive。")
+st.sidebar.info("資料永久保存：DB 與附件都存放在 Google Drive（附件為公開連結）。")
+
+with st.sidebar.expander("🔧 Fix attachments permissions"):
+    if st.button("Make my attachments public (anyone with link)"):
+        backfill_make_attachments_public(user)
+        st.success("Done. Refreshing…")
+        st.rerun()
 
 today = datetime.date.today().strftime("%Y-%m-%d")
 with st.form("new_entry"):
@@ -427,11 +465,14 @@ else:
 st.divider()
 st.subheader("✏️ 編輯過去日記 / Edit Past Entry")
 
+def entry_label(r):
+    return f"{r['date']} | {str(r['what'] or '')[:40]}"
+
 options_df = list_entries_for_user(user, limit=200)
 if options_df.empty:
     st.info("沒有可編輯的紀錄。")
 else:
-    options_df["label"] = options_df.apply(lambda r: f"{r['date']} | {str(r['what'] or '')[:40]}", axis=1)
+    options_df["label"] = options_df.apply(entry_label, axis=1)
     selected_label = st.selectbox("選擇要編輯的日記 / Select entry", options_df["label"].tolist())
     if selected_label:
         sel_id = options_df.loc[options_df["label"] == selected_label, "id"].iloc[0]
@@ -467,7 +508,7 @@ else:
                     with col2:
                         if st.button("刪除 / Delete", key=f"del-{a['id']}"):
                             delete_attachment(a["id"])
-                            st.experimental_rerun()
+                            st.rerun()
 
             if submitted_edit:
                 summary = summarize_text(new_what)
@@ -485,16 +526,16 @@ else:
                 replace_tasks(sel_id, new_plans.split("\n") if new_plans else [])
                 add_attachments(sel_id, add_files, user)
                 st.success("已更新！DB 已同步到 Google Drive ✅")
-                st.experimental_rerun()
+                st.rerun()
 
 st.divider()
 st.subheader("📤 匯出 / Export")
-entries = load_entry_bundle(user, limit=1)  # quick check for existence
-if entries:
+entries_exist = bool(list_entries_for_user(user, limit=1).shape[0])
+if entries_exist:
     conn = get_conn()
     df = pd.read_sql_query("SELECT * FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC", conn, params=(user,))
     conn.close()
     csv = df.to_csv(index=False).encode("utf-8-sig")
     st.download_button("下載 CSV (entries)", csv, file_name="entries.csv", mime="text/csv")
 
-st.caption("Note: Ensure both Drive folders are shared with your service account (Editor). For private images, manage Drive permissions.")
+st.caption("Note: Attachments are made public-read on upload so the browser can display them. If your org forbids public sharing, we can switch to a private proxy mode.")
