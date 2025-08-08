@@ -79,8 +79,15 @@ if st.button("提交 / Submit"):
 
 # --- Display past records and mood trend ---
 def render_multiline(text: str) -> str:
-    """Replace newline characters for inline rendering."""
-    return text.replace('\n', ' ')
+    """
+    Replace newline characters with HTML `<br>` tags so that
+    multi‑line journal entries retain their original formatting
+    when displayed with `st.markdown` (with `unsafe_allow_html=True`).
+    """
+    # If text is not a string (e.g. NaN), convert it to empty string
+    if not isinstance(text, str):
+        text = str(text)
+    return text.replace('\n', '<br>')
 
 st.markdown("---")
 st.subheader("📜 歷史紀錄（最近10筆）")
