@@ -10,27 +10,93 @@ import streamlit.components.v1 as components
 from wordcloud import WordCloud
 from io import BytesIO
 
+"""
+Enhanced diary application for Sanny.
 
-# --- Google Sheets Setup ---
-# This version of the app expects the worksheet to use **English column names**
-# (User, Date, What did you do today?, Meaningful Event, Mood, Was it your choice?,
-# What you wouldn’t repeat, Plans for tomorrow, Tags).  If your worksheet still
-# uses the older Chinese headers, rename them in Google Sheets before running
-# this code.
+This version builds upon the basic Streamlit journal app by adding
+additional features across several categories:
+  * Visual analytics – weekly mood bar chart and tag filtering.
+  * Content organization – tag filter to view entries by tag.
+  * Reminders & notifications – an "On this day" section shows past entries
+    from the same date in previous years.
+  * Analysis & AI integration – a simple sentiment analysis using
+    predefined positive and negative word lists.
+  * Attachments & media – upload images or audio files along with entries.
+  * Habit & task management – display tomorrow’s plans as a checklist.
+  * Data export & integration – export entries as CSV or JSON.
+
+Column names in the Google Sheet must be English: [User, Date, What did you do today?,
+Meaningful Event, Mood, Was it your choice?, What you wouldn’t repeat,
+Plans for tomorrow, Tags, Attachments].  For backwards‑compatibility,
+entries without Attachments will still load correctly.
+"""
+
+## Google Sheets Setup
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_info(st.secrets["google_auth"], scopes=scope)
 client = gspread.authorize(creds)
 sheet = client.open("journal_export").sheet1
 
-# --- Dynamic Users Setup ---
+## Utility functions
+def render_multiline(text: str) -> str:
+    """
+    Replace newline characters with HTML `<br>` tags so that
+    multi‑line journal entries retain their original formatting
+    when displayed with `st.markdown` (with `unsafe_allow_html=True`).
+    """
+    if not isinstance(text, str):
+        text = str(text)
+    return text.replace('\n', '<br>')
+
+
+def sentiment_score(text: str) -> int:
+    """
+    Compute a simple sentiment score based on positive/negative word lists.
+    Returns +1 for positive, -1 for negative, 0 for neutral.
+    """
+    if not isinstance(text, str):
+        return 0
+    text_lower = text.lower()
+    positives = {"good", "great", "happy", "satisfied", "amazing", "nice", "wonderful", "love", "enjoy", "success", "win"}
+    negatives = {"bad", "sad", "unhappy", "terrible", "awful", "hate", "angry", "frustrated", "fail", "loss", "tired"}
+    pos_count = sum(word in text_lower for word in positives)
+    neg_count = sum(word in text_lower for word in negatives)
+    if pos_count > neg_count:
+        return 1
+    elif neg_count > pos_count:
+        return -1
+    return 0
+
+
+def save_attachments(user: str, date: str, uploaded_files) -> str:
+    """
+    Save uploaded files to a user‑specific folder and return a semicolon
+    separated list of file paths.  If no files are uploaded, return an
+    empty string.  Only image and audio files are supported for display.
+    """
+    if not uploaded_files:
+        return ""
+    upload_dir = os.path.join("uploads", user)
+    os.makedirs(upload_dir, exist_ok=True)
+    paths = []
+    timestamp = datetime.datetime.now().strftime("%Y%m%d%H%M%S")
+    for file in uploaded_files:
+        filename = f"{date}_{timestamp}_{file.name}"
+        save_path = os.path.join(upload_dir, filename)
+        with open(save_path, "wb") as f:
+            f.write(file.getbuffer())
+        paths.append(save_path)
+    return ";".join(paths)
+
+
+## Dynamic Users Setup
 try:
     raw_records = sheet.get_all_records()
-    # Collect unique user names from the 'User' column
     USERS = sorted({rec['User'] for rec in raw_records if rec.get('User')})
 except Exception:
     USERS = []
 
-# --- User Login ---
+## User Login
 if 'logged_in' not in st.session_state:
     st.session_state.logged_in = False
 
@@ -44,9 +110,9 @@ if not st.session_state.logged_in:
         if username:
             st.session_state.logged_in = True
             st.session_state.user = username
-            # Append a blank row with English headers if the user is new
             if username not in USERS:
-                sheet.append_row([username, datetime.date.today().strftime("%Y-%m-%d")] + [""]*7)
+                # Append a new row with empty fields for the new user
+                sheet.append_row([username, datetime.date.today().strftime("%Y-%m-%d")] + [""]*8)
             components.html(""" window.location.reload(); """, height=0)
             st.stop()
         else:
@@ -56,11 +122,11 @@ else:
     user = st.session_state.user
     st.sidebar.success(f"已登入: {user}")
 
-# --- Title and Description ---
+## Title and Description
 st.title("🌀 迷惘但想搞懂的我 / Lost but Learning")
 st.markdown("黑白極簡，但情緒滿載 / Minimalist B&W, Full of Emotion")
 
-# --- Input Form ---
+## Input Form
 today = datetime.date.today().strftime("%Y-%m-%d")
 doing_today = st.text_area("📌 今天你做了什麼 / What did you do today?", height=150)
 feeling_event = st.text_area("🎯 今天有感覺的事 / What felt meaningful today?")
@@ -69,150 +135,107 @@ self_choice = st.text_area("🧠 是自主選擇嗎？/ Was it your choice?")
 dont_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?")
 plan_tomorrow = st.text_area("🌱 明天想做什麼 / Plans for tomorrow?")
 tags = st.text_area("🏷️ 標籤 / Tags (comma-separated)")
+uploaded_files = st.file_uploader("📎 附加檔案 / Attachments (image or audio)", accept_multiple_files=True)
 
 if st.button("提交 / Submit"):
-    row = [user, today, doing_today, feeling_event, overall_feeling, self_choice, dont_repeat, plan_tomorrow, tags]
+    # Save attachments and get a string of file paths
+    attachments_str = save_attachments(user, today, uploaded_files)
+    row = [user, today, doing_today, feeling_event, overall_feeling, self_choice, dont_repeat, plan_tomorrow, tags, attachments_str]
     sheet.append_row(row)
     st.balloons()
     st.success("已送出！明天見🎉")
     st.markdown("---")
 
-# --- Display past records and mood trend ---
-def render_multiline(text: str) -> str:
-    """
-    Replace newline characters with HTML `<br>` tags so that
-    multi‑line journal entries retain their original formatting
-    when displayed with `st.markdown` (with `unsafe_allow_html=True`).
-    """
-    # If text is not a string (e.g. NaN), convert it to empty string
-    if not isinstance(text, str):
-        text = str(text)
-    return text.replace('\n', '<br>')
-
-st.markdown("---")
-st.subheader("📜 歷史紀錄（最近10筆）")
-
+## Read data once for the rest of the page
 try:
     data = sheet.get_all_records()
     df = pd.DataFrame(data)
-
-    if not df.empty:
-        # Filter by current user and take the last 10 entries
-        df_user = df[df['User'] == user].tail(10)
-        for index, row in df_user.iterrows():
-            st.markdown(f"""
-
-🗓️ 日期： {row.get('Date', '')}
-📌 今天你做了什麼 / What did you do today?： {render_multiline(row.get('What did you do today?', ''))}
-🎯 今天有感覺的事 / What felt meaningful today?： {render_multiline(row.get('Meaningful Event', ''))}
-📊 今天整體感受 (1-10)： {row.get('Mood', '')}/10
-🧠 是自主選擇嗎？/ Was it your choice?： {render_multiline(row.get('Was it your choice?', ''))}
-🚫 今天最不想再來的事 / What you wouldn't repeat?： {render_multiline(row.get('What you wouldn’t repeat', ''))}
-🌱 明天想做什麼 / Plans for tomorrow?： {render_multiline(row.get('Plans for tomorrow', ''))}
-🏷️ 標籤 / Tags： {render_multiline(row.get('Tags', ''))}
-
-""", unsafe_allow_html=True)
-
-        # Mood trend chart
-        st.markdown("---")
-        st.subheader("📈 心情趨勢圖 / Mood Trend")
-        mood_df = df_user[['Date', 'Mood']].copy()
-        mood_df.columns = ['date', 'mood']
-        mood_df['date'] = pd.to_datetime(mood_df['date'])
-        mood_df['mood'] = pd.to_numeric(mood_df['mood'], errors='coerce')
-        mood_df = mood_df.dropna().sort_values('date')
-
-        fig, ax = plt.subplots(figsize=(8, 4))
-        ax.plot(mood_df['date'], mood_df['mood'], marker='o')
-        ax.set_title('Mood Trend Over Time')
-        ax.set_xlabel('Date')
-        ax.set_ylabel('Mood')
-        ax.xaxis.set_major_formatter(mdates.DateFormatter('%m-%d'))
-        fig.autofmt_xdate()
-        st.pyplot(fig)
-    else:
-        st.info("目前還沒有紀錄喔。")
-
 except Exception as e:
     st.error(f"讀取紀錄時發生錯誤：{e}")
+    df = pd.DataFrame()
 
-# --- Edit Entry Section ---
+## On This Day – show past entries from the same date in previous years
 st.markdown("---")
-st.subheader("✏️ 編輯紀錄 / Edit Past Entry")
-
-# Extract all records for the current user
-user_data = df[df['User'] == user].copy()
-user_data['Date'] = pd.to_datetime(user_data['Date'])
-user_data = user_data.sort_values('Date', ascending=False).reset_index(drop=True)
-
-if not user_data.empty:
-    edit_dates = user_data['Date'].dt.strftime('%Y-%m-%d').tolist()
-    default_date = edit_dates[0]  # default to the most recent entry
-    selected_date = st.selectbox("選擇要編輯的日期 / Select a date to edit", edit_dates, index=0)
-
-    # Locate the entry to edit
-    record_to_edit = user_data[user_data['Date'].dt.strftime('%Y-%m-%d') == selected_date].iloc[0]
-    row_number_in_sheet = df[(df['User'] == user) & (df['Date'] == selected_date)].index[0] + 2  # +2 for header row
-
-    # Build editable form
-    with st.form("edit_form"):
-        new_doing = st.text_area("📌 今天你做了什麼 / What did you do today?", record_to_edit.get('What did you do today?', ''), height=100)
-        new_event = st.text_area("🎯 今天有感覺的事 / What felt meaningful today?", record_to_edit.get('Meaningful Event', ''))
-        new_mood = st.slider("📊 今天整體感受 (1-10)", 1, 10, int(record_to_edit.get('Mood', 5)))
-        new_choice = st.text_area("🧠 是自主選擇嗎？/ Was it your choice?", record_to_edit.get('Was it your choice?', ''))
-        new_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?", record_to_edit.get('What you wouldn’t repeat', ''))
-        new_plan = st.text_area("🌱 明天想做什麼 / Plans for tomorrow?", record_to_edit.get('Plans for tomorrow', ''))
-        new_tags = st.text_area("🏷️ 標籤 / Tags (comma-separated)", record_to_edit.get('Tags', ''))
-
-        submitted = st.form_submit_button("更新紀錄 / Update Entry")
-        if submitted:
-            updated_row = [user, selected_date, new_doing, new_event, new_mood, new_choice, new_repeat, new_plan, new_tags]
-            sheet.update(f'A{row_number_in_sheet}:I{row_number_in_sheet}', [updated_row])
-            st.success(f"{selected_date} 的紀錄已成功更新！ / Entry Updated")
-            st.rerun()
-else:
-    st.info("目前尚無可供編輯的紀錄。")
-
-# --- Search Entries Function ---
-st.markdown("---")
-st.subheader("🔍 搜尋紀錄 / Search Journal Entries")
-
-search_query = st.text_input("輸入關鍵字來搜尋所有紀錄 / Enter keyword to search all entries")
-
-if search_query:
-    try:
-        all_data = sheet.get_all_records()
-        search_df = pd.DataFrame(all_data)
-        search_df = search_df.fillna("")  # handle NaN for searching
-
-        # Search across all columns by converting to string
-        mask = search_df.apply(lambda row: row.astype(str).str.contains(search_query, case=False, na=False)).any(axis=1)
-        result_df = search_df[mask]
-
-        if not result_df.empty:
-            st.success(f"找到 {len(result_df)} 筆包含「{search_query}」的紀錄")
-            for index, row in result_df.iterrows():
-                st.markdown(f"""
-
-🗓️ 日期： {row.get('Date', '')}
-📌 今天你做了什麼 / What did you do today?： {render_multiline(row.get('What did you do today?', ''))}
-🎯 今天有感覺的事 / What felt meaningful today?： {render_multiline(row.get('Meaningful Event', ''))}
-📊 今天整體感受 (1-10)： {row.get('Mood', '')}/10
-🧠 是自主選擇嗎？/ Was it your choice?： {render_multiline(row.get('Was it your choice?', ''))}
-🚫 今天最不想再來的事 / What you wouldn't repeat?： {render_multiline(row.get('What you wouldn’t repeat', ''))}
-🌱 明天想做什麼 / Plans for tomorrow?： {render_multiline(row.get('Plans for tomorrow', ''))}
-🏷️ 標籤 / Tags： {row.get('Tags', '')}
-
+st.subheader("🕰️ 歷史上的今天 / On This Day")
+if not df.empty:
+    today_month_day = today[5:]  # 'MM-DD'
+    past_entries = df[(df['User'] == user) & (df['Date'].str[5:] == today_month_day) & (df['Date'] != today)]
+    if not past_entries.empty:
+        for _, row in past_entries.iterrows():
+            st.markdown(f"""
+**{row['Date']}** – {render_multiline(row.get('What did you do today?', ''))}
 """, unsafe_allow_html=True)
-        else:
-            st.info(f"沒有找到包含「{search_query}」的紀錄。")
+    else:
+        st.info("今天沒有往年的紀錄。")
+else:
+    st.info("目前沒有任何紀錄。")
 
-    except Exception as e:
-        st.error(f"搜尋時發生錯誤：{e}")
-
-# --- Export Data as CSV ---
+## History Section with tag filter and sentiment analysis
 st.markdown("---")
-st.subheader("📤 匯出紀錄 / Export Entries as CSV")
+st.subheader("📜 歷史紀錄（最近10筆）")
+
+if not df.empty:
+    df_user = df[df['User'] == user].copy()
+    # Parse tags into sets
+    df_user['TagList'] = df_user['Tags'].fillna('').apply(lambda t: [tag.strip() for tag in t.split(',') if tag.strip()])
+    # Build unique tag options
+    unique_tags = sorted({tag for tags_list in df_user['TagList'] for tag in tags_list})
+    selected_tags = st.multiselect("選擇標籤過濾 / Filter by tags", options=unique_tags)
+    if selected_tags:
+        df_user = df_user[df_user['TagList'].apply(lambda tags_list: any(tag in tags_list for tag in selected_tags))]
+    # Limit to last 10 entries
+    df_user = df_user.sort_values('Date').tail(10)
+    for idx, row in df_user.iterrows():
+        sentiment = sentiment_score(row.get('What did you do today?', ''))
+        sentiment_label = {1: 'Positive', -1: 'Negative', 0: 'Neutral'}.get(sentiment, 'Neutral')
+        st.markdown(f"""
+🗓️ **日期：** {row.get('Date', '')}  
+📌 **今天你做了什麼 / What did you do today?**： {render_multiline(row.get('What did you do today?', ''))}  
+🎯 **今天有感覺的事 / What felt meaningful today?**： {render_multiline(row.get('Meaningful Event', ''))}  
+📊 **今天整體感受 (1-10)**： {row.get('Mood', '')}/10  
+🧠 **是自主選擇嗎？/ Was it your choice?**： {render_multiline(row.get('Was it your choice?', ''))}  
+🚫 **今天最不想再來的事 / What you wouldn't repeat?**： {render_multiline(row.get('What you wouldn’t repeat', ''))}  
+🌱 **明天想做什麼 / Plans for tomorrow?**： {render_multiline(row.get('Plans for tomorrow', ''))}  
+🏷️ **標籤 / Tags**： {', '.join(row['TagList'])}  
+💬 **Sentiment (auto)**： {sentiment_label}
+""", unsafe_allow_html=True)
+        # Display attachments if any
+        attach_str = row.get('Attachments', '')
+        if attach_str:
+            files = [p for p in attach_str.split(';') if p]
+            for fpath in files:
+                if fpath.lower().endswith(('.png', '.jpg', '.jpeg', '.gif', '.bmp')) and os.path.exists(fpath):
+                    st.image(fpath, width=200)
+                elif fpath.lower().endswith(('.mp3', '.wav', '.ogg')) and os.path.exists(fpath):
+                    st.audio(fpath)
+        # Display tomorrow's plans as checkboxes (habit/task management)
+        tasks = [task.strip() for task in row.get('Plans for tomorrow', '').split('\n') if task.strip()]
+        if tasks:
+            st.write("**Tomorrow's Tasks:**")
+            for t in tasks:
+                st.checkbox(t, key=f"task-{idx}-{t}")
+
+    # Visual analytics – weekly mood bar chart
+    st.markdown("---")
+    st.subheader("📊 每週心情平均 / Average Mood by Week")
+    df_user['Date_dt'] = pd.to_datetime(df_user['Date'])
+    df_user['Week'] = df_user['Date_dt'].dt.to_period('W').astype(str)
+    weekly_mood = df_user.groupby('Week')['Mood'].apply(lambda x: pd.to_numeric(x, errors='coerce').mean()).dropna()
+    if not weekly_mood.empty:
+        fig2, ax2 = plt.subplots(figsize=(8, 4))
+        weekly_mood.plot(kind='bar', ax=ax2, color='skyblue')
+        ax2.set_title('Average Mood by Week')
+        ax2.set_xlabel('Week')
+        ax2.set_ylabel('Average Mood')
+        st.pyplot(fig2)
+    else:
+        st.info("沒有足夠的資料繪製每週心情圖表。")
+else:
+    st.info("目前還沒有紀錄喔。")
+
+## Export Section
+st.markdown("---")
+st.subheader("📤 匯出紀錄 / Export Entries")
 
 export_option = st.radio("選擇要匯出的內容 / Choose what to export:", [
     "🔹 單日紀錄 / One Day (Current User)",
@@ -220,64 +243,41 @@ export_option = st.radio("選擇要匯出的內容 / Choose what to export:", [
     "🔺 所有紀錄 / All Entries (All Users)"
 ])
 
-if export_option == "🔹 單日紀錄 / One Day (Current User)":
-    export_date = st.selectbox("選擇日期 / Select a date", user_data['Date'].dt.strftime('%Y-%m-%d').tolist())
-    export_df = user_data[user_data['Date'].dt.strftime('%Y-%m-%d') == export_date]
+export_format = st.radio("選擇格式 / Choose format:", [
+    "CSV", "JSON"
+], index=0, horizontal=True)
 
-elif export_option == "🔸 最近10筆 / Recent 10 Entries (Current User)":
-    export_df = user_data.head(10)
+if not df.empty:
+    if export_option == "🔹 單日紀錄 / One Day (Current User)":
+        export_date = st.selectbox("選擇日期 / Select a date", df_user['Date_dt'].dt.strftime('%Y-%m-%d').tolist())
+        export_df = df_user[df_user['Date_dt'].dt.strftime('%Y-%m-%d') == export_date]
+    elif export_option == "🔸 最近10筆 / Recent 10 Entries (Current User)":
+        export_df = df_user.tail(10)
+    else:
+        export_df = pd.DataFrame(data)
 
-elif export_option == "🔺 所有紀錄 / All Entries (All Users)":
-    all_data = sheet.get_all_records()
-    export_df = pd.DataFrame(all_data)
+    # Prepare data for export; convert lists to strings
+    export_df_copy = export_df.copy()
+    export_df_copy['Tags'] = export_df_copy['TagList'].apply(lambda lst: ', '.join(lst))
+    export_df_copy.drop(columns=['TagList', 'Date_dt', 'Week'], errors='ignore', inplace=True)
 
-    # no need to rename columns; they are already English
-
-# Export CSV
-csv = export_df.to_csv(index=False).encode('utf-8-sig')  # UTF-8 with BOM
-st.download_button(
-    label="📥 下載 CSV / Download CSV",
-    data=csv,
-    file_name="journal_export.csv",
-    mime='text/csv'
-)
-
-# Word Cloud Section
-st.markdown("---")
-st.subheader("☁️ 常見詞雲 / Frequent Words Cloud")
-
-# Build text content from selected columns
-word_fields = [
-    'What did you do today?',
-    'Meaningful Event',
-    'Was it your choice?',
-    'What you wouldn’t repeat',
-    'Plans for tomorrow',
-    'Tags'
-]
-all_data = sheet.get_all_records()
-all_df = pd.DataFrame(all_data)
-text_data = all_df[word_fields].fillna('').apply(lambda row: ' '.join(str(val) for val in row), axis=1).str.cat(sep=' ')
-
-# Font path (handles both local and Streamlit Cloud)
-font_path = os.path.join("assets", "NotoSansCJKtc-Regular.otf")
-
-# Check if font exists
-if os.path.exists(font_path):
-    try:
-        wordcloud = WordCloud(
-            width=800,
-            height=400,
-            background_color='white',
-            font_path=font_path,
-            collocations=False
-        ).generate(text_data)
-
-        fig, ax = plt.subplots(figsize=(10, 5))
-        ax.imshow(wordcloud, interpolation='bilinear')
-        ax.axis('off')
-        st.pyplot(fig)
-    except Exception:
-        st.info("詞雲生成失敗，可能是字體檔缺失或其他錯誤。")
+    if export_format == "CSV":
+        csv_data = export_df_copy.to_csv(index=False).encode('utf-8-sig')
+        st.download_button(
+            label="📥 下載 CSV / Download CSV",
+            data=csv_data,
+            file_name="journal_export.csv",
+            mime='text/csv'
+        )
+    else:
+        # JSON export
+        json_str = export_df_copy.to_json(orient='records', force_ascii=False)
+        json_bytes = json_str.encode('utf-8')
+        st.download_button(
+            label="📥 下載 JSON / Download JSON",
+            data=json_bytes,
+            file_name="journal_export.json",
+            mime='application/json'
+        )
 else:
-    st.info("找不到字體檔案，無法生成詞雲。")
+    st.info("沒有資料可匯出。")
