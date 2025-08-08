@@ -530,8 +530,6 @@ else:
         st.markdown(f"**🗓️ {e['date']}** — **Mood:** {e['mood'] if e['mood'] is not None else '-'} /10")
         st.markdown(f"**What:** {e['what'] or ''}")
         if e["meaningful"]: st.markdown(f"**Meaningful:** {e['meaningful']}")
-        if e["summary"]:
-            with st.expander("🧾 Summary (auto)"): st.write(e["summary"])
 
         # IMAGES
         if e.get("images"):
