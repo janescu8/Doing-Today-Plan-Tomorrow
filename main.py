@@ -12,6 +12,11 @@ from io import BytesIO
 
 
 # --- Google Sheets Setup ---
+# This version of the app expects the worksheet to use **English column names**
+# (User, Date, What did you do today?, Meaningful Event, Mood, Was it your choice?,
+# What you wouldn’t repeat, Plans for tomorrow, Tags).  If your worksheet still
+# uses the older Chinese headers, rename them in Google Sheets before running
+# this code.
 scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
 creds = Credentials.from_service_account_info(st.secrets["google_auth"], scopes=scope)
 client = gspread.authorize(creds)
@@ -20,7 +25,8 @@ sheet = client.open("journal_export").sheet1
 # --- Dynamic Users Setup ---
 try:
     raw_records = sheet.get_all_records()
-    USERS = sorted({rec['使用者'] for rec in raw_records if rec.get('使用者')})
+    # Collect unique user names from the 'User' column
+    USERS = sorted({rec['User'] for rec in raw_records if rec.get('User')})
 except Exception:
     USERS = []
 
@@ -38,9 +44,10 @@ if not st.session_state.logged_in:
         if username:
             st.session_state.logged_in = True
             st.session_state.user = username
+            # Append a blank row with English headers if the user is new
             if username not in USERS:
                 sheet.append_row([username, datetime.date.today().strftime("%Y-%m-%d")] + [""]*7)
-            components.html("""<script>window.location.reload();</script>""", height=0)
+            components.html(""" window.location.reload(); """, height=0)
             st.stop()
         else:
             st.sidebar.error("請輸入使用者名稱 / Enter a user name")
@@ -70,10 +77,10 @@ if st.button("提交 / Submit"):
     st.success("已送出！明天見🎉")
     st.markdown("---")
 
-# --- 顯示過去紀錄與趨勢圖 ---
-# 換行處理函數
-def render_multiline(text):
-    return text.replace('\n', '<br>')
+# --- Display past records and mood trend ---
+def render_multiline(text: str) -> str:
+    """Replace newline characters for inline rendering."""
+    return text.replace('\n', ' ')
 
 st.markdown("---")
 st.subheader("📜 歷史紀錄（最近10筆）")
@@ -83,25 +90,26 @@ try:
     df = pd.DataFrame(data)
 
     if not df.empty:
-        df = df[df['使用者'] == user].tail(10)
-        for index, row in df.iterrows():
+        # Filter by current user and take the last 10 entries
+        df_user = df[df['User'] == user].tail(10)
+        for index, row in df_user.iterrows():
             st.markdown(f"""
-            <div style='border:1px solid #ccc; border-radius:10px; padding:10px; margin-bottom:10px;'>
-                <strong>🗓️ 日期：</strong> {row.get('日期', '')}<br>
-                <strong>📌 今天你做了什麼 / What did you do today?：</strong><br> {render_multiline(row.get('今天你做了什麼', ''))}<br>
-                <strong>🎯 今天有感覺的事 / What felt meaningful today?：</strong><br> {render_multiline(row.get('今天你有感覺的事', ''))}<br>
-                <strong>📊 今天整體感受 (1-10)：</strong> {row.get('今天整體感受', '')}/10<br>
-                <strong>🧠 是自主選擇嗎？/ Was it your choice?：</strong><br> {render_multiline(row.get('今天做的事，是自己選的嗎？', ''))}<br>
-                <strong>🚫 今天最不想再來的事 / What you wouldn't repeat?：</strong><br> {render_multiline(row.get('今天最不想再來一次的事', ''))}<br>
-                <strong>🌱 明天想做什麼 / Plans for tomorrow?：</strong><br> {render_multiline(row.get('明天你想做什麼', ''))}<br>
-                <strong>🏷️ 標籤 / Tags：</strong><br> {render_multiline(row.get('標籤', ''))}<br>
-            </div>
-            """, unsafe_allow_html=True)
 
-        # 心情趨勢圖
+🗓️ 日期： {row.get('Date', '')}
+📌 今天你做了什麼 / What did you do today?： {render_multiline(row.get('What did you do today?', ''))}
+🎯 今天有感覺的事 / What felt meaningful today?： {render_multiline(row.get('Meaningful Event', ''))}
+📊 今天整體感受 (1-10)： {row.get('Mood', '')}/10
+🧠 是自主選擇嗎？/ Was it your choice?： {render_multiline(row.get('Was it your choice?', ''))}
+🚫 今天最不想再來的事 / What you wouldn't repeat?： {render_multiline(row.get('What you wouldn’t repeat', ''))}
+🌱 明天想做什麼 / Plans for tomorrow?： {render_multiline(row.get('Plans for tomorrow', ''))}
+🏷️ 標籤 / Tags： {render_multiline(row.get('Tags', ''))}
+
+""", unsafe_allow_html=True)
+
+        # Mood trend chart
         st.markdown("---")
         st.subheader("📈 心情趨勢圖 / Mood Trend")
-        mood_df = df[['日期', '今天整體感受']].copy()
+        mood_df = df_user[['Date', 'Mood']].copy()
         mood_df.columns = ['date', 'mood']
         mood_df['date'] = pd.to_datetime(mood_df['date'])
         mood_df['mood'] = pd.to_numeric(mood_df['mood'], errors='coerce')
@@ -121,33 +129,33 @@ try:
 except Exception as e:
     st.error(f"讀取紀錄時發生錯誤：{e}")
 
-# --- 編輯紀錄區塊 ---
+# --- Edit Entry Section ---
 st.markdown("---")
 st.subheader("✏️ 編輯紀錄 / Edit Past Entry")
 
-# 取出該使用者所有紀錄
-user_data = df[df['使用者'] == user].copy()
-user_data['日期'] = pd.to_datetime(user_data['日期'])
-user_data = user_data.sort_values('日期', ascending=False).reset_index(drop=True)
+# Extract all records for the current user
+user_data = df[df['User'] == user].copy()
+user_data['Date'] = pd.to_datetime(user_data['Date'])
+user_data = user_data.sort_values('Date', ascending=False).reset_index(drop=True)
 
 if not user_data.empty:
-    edit_dates = user_data['日期'].dt.strftime('%Y-%m-%d').tolist()
-    default_date = edit_dates[0]  # 預設是最新一筆
+    edit_dates = user_data['Date'].dt.strftime('%Y-%m-%d').tolist()
+    default_date = edit_dates[0]  # default to the most recent entry
     selected_date = st.selectbox("選擇要編輯的日期 / Select a date to edit", edit_dates, index=0)
 
-    # 找到要編輯的那筆紀錄
-    record_to_edit = user_data[user_data['日期'].dt.strftime('%Y-%m-%d') == selected_date].iloc[0]
-    row_number_in_sheet = df[(df['使用者'] == user) & (df['日期'] == selected_date)].index[0] + 2  # gspread row (加上 header)
+    # Locate the entry to edit
+    record_to_edit = user_data[user_data['Date'].dt.strftime('%Y-%m-%d') == selected_date].iloc[0]
+    row_number_in_sheet = df[(df['User'] == user) & (df['Date'] == selected_date)].index[0] + 2  # +2 for header row
 
-    # 建立可編輯表單
+    # Build editable form
     with st.form("edit_form"):
-        new_doing = st.text_area("📌 今天你做了什麼 / What did you do today?", record_to_edit.get('今天你做了什麼', ''), height=100)
-        new_event = st.text_area("🎯 今天有感覺的事 / What felt meaningful today?", record_to_edit.get('今天你有感覺的事', ''))
-        new_mood = st.slider("📊 今天整體感受 (1-10)", 1, 10, int(record_to_edit.get('今天整體感受', 5)))
-        new_choice = st.text_area("🧠 是自主選擇嗎？/ Was it your choice?", record_to_edit.get('今天做的事，是自己選的嗎？', ''))
-        new_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?", record_to_edit.get('今天最不想再來一次的事', ''))
-        new_plan = st.text_area("🌱 明天想做什麼 / Plans for tomorrow?", record_to_edit.get('明天你想做什麼', ''))
-        new_tags = st.text_area("🏷️ 標籤 / Tags (comma-separated)", record_to_edit.get('標籤', ''))
+        new_doing = st.text_area("📌 今天你做了什麼 / What did you do today?", record_to_edit.get('What did you do today?', ''), height=100)
+        new_event = st.text_area("🎯 今天有感覺的事 / What felt meaningful today?", record_to_edit.get('Meaningful Event', ''))
+        new_mood = st.slider("📊 今天整體感受 (1-10)", 1, 10, int(record_to_edit.get('Mood', 5)))
+        new_choice = st.text_area("🧠 是自主選擇嗎？/ Was it your choice?", record_to_edit.get('Was it your choice?', ''))
+        new_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?", record_to_edit.get('What you wouldn’t repeat', ''))
+        new_plan = st.text_area("🌱 明天想做什麼 / Plans for tomorrow?", record_to_edit.get('Plans for tomorrow', ''))
+        new_tags = st.text_area("🏷️ 標籤 / Tags (comma-separated)", record_to_edit.get('Tags', ''))
 
         submitted = st.form_submit_button("更新紀錄 / Update Entry")
         if submitted:
@@ -157,8 +165,8 @@ if not user_data.empty:
             st.rerun()
 else:
     st.info("目前尚無可供編輯的紀錄。")
-    
-# --- 搜尋紀錄功能 / Search Entries ---
+
+# --- Search Entries Function ---
 st.markdown("---")
 st.subheader("🔍 搜尋紀錄 / Search Journal Entries")
 
@@ -168,9 +176,9 @@ if search_query:
     try:
         all_data = sheet.get_all_records()
         search_df = pd.DataFrame(all_data)
-        search_df = search_df.fillna("")  # Handle NaN for searching
+        search_df = search_df.fillna("")  # handle NaN for searching
 
-        # 將所有欄位轉為字串並搜尋關鍵字
+        # Search across all columns by converting to string
         mask = search_df.apply(lambda row: row.astype(str).str.contains(search_query, case=False, na=False)).any(axis=1)
         result_df = search_df[mask]
 
@@ -178,25 +186,24 @@ if search_query:
             st.success(f"找到 {len(result_df)} 筆包含「{search_query}」的紀錄")
             for index, row in result_df.iterrows():
                 st.markdown(f"""
-                <div style='border:1px solid #ccc; border-radius:10px; padding:10px; margin-bottom:10px;'>
-                    <strong>🗓️ 日期：</strong> {row.get('日期', '')}<br>
-                    <strong>📌 今天你做了什麼 / What did you do today?：</strong><br> {render_multiline(row.get('今天你做了什麼', ''))}<br>
-                    <strong>🎯 今天有感覺的事 / What felt meaningful today?：</strong><br> {render_multiline(row.get('今天你有感覺的事', ''))}<br>
-                    <strong>📊 今天整體感受 (1-10)：</strong> {row.get('今天整體感受', '')}/10<br>
-                    <strong>🧠 是自主選擇嗎？/ Was it your choice?：</strong><br> {render_multiline(row.get('今天做的事，是自己選的嗎？', ''))}<br>
-                    <strong>🚫 今天最不想再來的事 / What you wouldn't repeat?：</strong><br> {render_multiline(row.get('今天最不想再來一次的事', ''))}<br>
-                    <strong>🌱 明天想做什麼 / Plans for tomorrow?：</strong><br> {render_multiline(row.get('明天你想做什麼', ''))}<br>
-                    <strong>🏷️ 標籤 / Tags：</strong> {row.get('標籤', '')}
-                </div>
-                """, unsafe_allow_html=True)
+
+🗓️ 日期： {row.get('Date', '')}
+📌 今天你做了什麼 / What did you do today?： {render_multiline(row.get('What did you do today?', ''))}
+🎯 今天有感覺的事 / What felt meaningful today?： {render_multiline(row.get('Meaningful Event', ''))}
+📊 今天整體感受 (1-10)： {row.get('Mood', '')}/10
+🧠 是自主選擇嗎？/ Was it your choice?： {render_multiline(row.get('Was it your choice?', ''))}
+🚫 今天最不想再來的事 / What you wouldn't repeat?： {render_multiline(row.get('What you wouldn’t repeat', ''))}
+🌱 明天想做什麼 / Plans for tomorrow?： {render_multiline(row.get('Plans for tomorrow', ''))}
+🏷️ 標籤 / Tags： {row.get('Tags', '')}
+
+""", unsafe_allow_html=True)
         else:
             st.info(f"沒有找到包含「{search_query}」的紀錄。")
 
     except Exception as e:
         st.error(f"搜尋時發生錯誤：{e}")
 
-
-# --- 匯出資料為 CSV ---
+# --- Export Data as CSV ---
 st.markdown("---")
 st.subheader("📤 匯出紀錄 / Export Entries as CSV")
 
@@ -207,8 +214,8 @@ export_option = st.radio("選擇要匯出的內容 / Choose what to export:", [
 ])
 
 if export_option == "🔹 單日紀錄 / One Day (Current User)":
-    export_date = st.selectbox("選擇日期 / Select a date", user_data['日期'].dt.strftime('%Y-%m-%d').tolist())
-    export_df = user_data[user_data['日期'].dt.strftime('%Y-%m-%d') == export_date]
+    export_date = st.selectbox("選擇日期 / Select a date", user_data['Date'].dt.strftime('%Y-%m-%d').tolist())
+    export_df = user_data[user_data['Date'].dt.strftime('%Y-%m-%d') == export_date]
 
 elif export_option == "🔸 最近10筆 / Recent 10 Entries (Current User)":
     export_df = user_data.head(10)
@@ -217,19 +224,7 @@ elif export_option == "🔺 所有紀錄 / All Entries (All Users)":
     all_data = sheet.get_all_records()
     export_df = pd.DataFrame(all_data)
 
-    # Rename columns only if they exist in the full sheet
-    export_df.rename(columns={
-        '使用者': 'User',
-        '日期': 'Date',
-        '今天你做了什麼': 'What did you do today?',
-        '今天你有感覺的事': 'Meaningful Event',
-        '今天整體感受': 'Mood',
-        '今天做的事，是自己選的嗎？': 'Was it your choice?',
-        '今天最不想再來一次的事': 'What you wouldn’t repeat',
-        '明天你想做什麼': 'Plans for tomorrow',
-        '標籤': 'Tags'  # 🏷️ 新增這一行
-    }, inplace=True)
-
+    # no need to rename columns; they are already English
 
 # Export CSV
 csv = export_df.to_csv(index=False).encode('utf-8-sig')  # UTF-8 with BOM
@@ -244,8 +239,15 @@ st.download_button(
 st.markdown("---")
 st.subheader("☁️ 常見詞雲 / Frequent Words Cloud")
 
-# Build text content
-word_fields = ['今天你做了什麼', '今天你有感覺的事', '今天做的事，是自己選的嗎？', '今天最不想再來一次的事', '明天你想做什麼', '標籤']
+# Build text content from selected columns
+word_fields = [
+    'What did you do today?',
+    'Meaningful Event',
+    'Was it your choice?',
+    'What you wouldn’t repeat',
+    'Plans for tomorrow',
+    'Tags'
+]
 all_data = sheet.get_all_records()
 all_df = pd.DataFrame(all_data)
 text_data = all_df[word_fields].fillna('').apply(lambda row: ' '.join(str(val) for val in row), axis=1).str.cat(sep=' ')
@@ -268,9 +270,7 @@ if os.path.exists(font_path):
         ax.imshow(wordcloud, interpolation='bilinear')
         ax.axis('off')
         st.pyplot(fig)
-
-    except Exception as e:
-        st.warning(f"❗ 無法生成詞雲（Word Cloud）：{e}")
+    except Exception:
+        st.info("詞雲生成失敗，可能是字體檔缺失或其他錯誤。")
 else:
-    st.warning("⚠️ 無法找到中文字型，請確認 assets/NotoSansCJKtc-Regular.otf 是否存在。")
-
+    st.info("找不到字體檔案，無法生成詞雲。")
