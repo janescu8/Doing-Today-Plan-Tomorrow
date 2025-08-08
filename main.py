@@ -276,14 +276,21 @@ if not df.empty:
     df_user['TagList'] = df_user['Tags'].fillna('').apply(lambda t: [tag.strip() for tag in t.split(',') if tag.strip()])
     # Parse tasks and statuses
     def parse_tasks_and_statuses(plans: str, statuses: str):
-        tasks_list = [t.strip() for t in plans.split('\n') if t.strip()]
-        status_list = [s.strip() for s in statuses.split(';') if s.strip()]
+        # Ensure plans and statuses are strings; handle None or NaN gracefully
+        plans_str = plans if isinstance(plans, str) else str(plans or "")
+        statuses_str = statuses if isinstance(statuses, str) else str(statuses or "")
+        # Compute lists from newline and semicolon separators
+        tasks_list = [t.strip() for t in plans_str.split('\n') if t.strip()]
+        # Consider only numeric-like flags ('1'/'0'); treat other values as unchecked
+        status_list = []
+        if statuses_str and statuses_str.lower() not in ['nan', 'none']:
+            status_list = [s.strip() for s in statuses_str.split(';') if s.strip()]
         # Align status list length with tasks; default to '0' (unchecked)
         if len(status_list) < len(tasks_list):
             status_list += ['0'] * (len(tasks_list) - len(status_list))
         elif len(status_list) > len(tasks_list):
             status_list = status_list[:len(tasks_list)]
-        bool_status = [s == '1' for s in status_list]
+        bool_status = [str(s) == '1' for s in status_list]
         return tasks_list, bool_status
     df_user[['TaskList', 'TaskStatusList']] = df_user.apply(
         lambda r: parse_tasks_and_statuses(r.get('Plans for tomorrow', ''), r.get('Task Statuses', '')), axis=1, result_type='expand'
