@@ -454,7 +454,7 @@ elif section == "Recent Entries":
                 st.write("**Images:**")
                 for a in e["images"]:
                     data, _ = fetch_drive_bytes(a["file_id"])
-                    st.image(data, width=100%)
+                    st.image(data, use_column_width=True)
 
             if e.get("audio"):
                 st.write("**Audio:**")
