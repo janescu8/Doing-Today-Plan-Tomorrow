@@ -517,7 +517,7 @@ elif section == "Edit Past Entry":
                         col1, col2 = st.columns([4,1])
                         with col1:
                             data, _ = fetch_drive_bytes(a["file_id"])
-                            st.image(data, width=220)
+                            st.image(data, use_column_width=True)
                         with col2:
                             if st.button("刪除 / Delete", key=f"del-img-{a['id']}"):
                                 delete_image(a["id"]); st.rerun()
