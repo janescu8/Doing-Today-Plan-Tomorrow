@@ -699,7 +699,7 @@ if section == "New Entry":
 
 elif section == "Recent Entries":
     st.subheader("📜 歷史紀錄（最近5筆） / Recent Entries")
-    entries = load_entry_bundle(user, limit=5)
+    entries = load_entry_bundle(user)
     if not entries:
         st.info("尚無紀錄。")
     else:
