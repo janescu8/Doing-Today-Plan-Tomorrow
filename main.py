@@ -13,18 +13,20 @@ except Exception:
 
 # --- Optional OpenAI LLM for monthly summary (fallback to sumy) ---
 OPENAI_AVAILABLE = False
+client = None
 try:
-    import openai
+    from openai import OpenAI
     api_key = None
     if "openai" in st.secrets and "api_key" in st.secrets["openai"]:
         api_key = st.secrets["openai"]["api_key"]
     elif os.getenv("OPENAI_API_KEY"):
         api_key = os.getenv("OPENAI_API_KEY")
     if api_key:
-        openai.api_key = api_key
+        client = OpenAI(api_key=api_key)
         OPENAI_AVAILABLE = True
 except Exception:
     OPENAI_AVAILABLE = False
+    client = None
 
 # --- Google Drive client (non-resumable uploads for reliability) ---
 from google.oauth2.service_account import Credentials
@@ -439,15 +441,15 @@ def llm_monthly_summary(user: str, year: int, month: int) -> str:
             Entries:
             """ + digest)
 
-            resp = openai.ChatCompletion.create(
+            resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
-                    {"role":"system","content":"You are a helpful, concise coach."},
-                    {"role":"user","content": prompt}
+                    {"role": "system", "content": "You are a helpful, concise coach."},
+                    {"role": "user", "content": prompt},
                 ],
                 temperature=0.5,
             )
-            return resp.choices[0].message["content"].strip()
+            return resp.choices[0].message.content.strip()
         except Exception as e:
             st.warning(f"OpenAI API failed: {str(e)}. Using fallback method.")
 
