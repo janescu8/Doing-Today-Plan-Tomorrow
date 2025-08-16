@@ -643,13 +643,22 @@ elif section == "Monthly Summary":
             digest = "\n".join(lines)
             if OPENAI_AVAILABLE:
                 try:
-                    prompt = ("""Based on the provided daily diary entries, 
-                    craft a single‑paragraph monthly reflection. Identify recurring patterns and themes across the month, 
-                    celebrate notable wins, acknowledge ongoing struggles or challenges, 
-                    and conclude with three specific, actionable suggestions to improve the coming month. 
-                    Keep the entire reflection under 500 words.""" + digest)
+                    prompt = ("""You are a helpful, concise coach. 
+                    From the following daily diary entries, produce a SINGLE cohesive paragraph that serves as a monthly reflection. 
+                    Do NOT list or repeat individual daily logs. Instead, synthesize them into:
+                    - Patterns and recurring themes across the month
+                    - Key wins and achievements
+                    - Main struggles or challenges
+                    - Exactly three actionable suggestions for improvement next month
+                    
+                    The output must be written as smooth prose (not bullet points, not a log), 
+                    and must stay under 200 words. 
+            
+                    Entries:
+                    """ + digest)
+            
                     resp = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
+                        model="gpt-4o-mini",   # upgrade here
                         messages=[{"role":"system","content":"You are a helpful, concise coach."},
                                   {"role":"user","content": prompt}],
                         temperature=0.5,
@@ -657,6 +666,7 @@ elif section == "Monthly Summary":
                     return resp.choices[0].message["content"].strip()
                 except Exception:
                     pass
+
             if LsaSummarizer is None: return digest[:1000]
             try:
                 parser = PlaintextParser.from_string(digest, Tokenizer("english"))
