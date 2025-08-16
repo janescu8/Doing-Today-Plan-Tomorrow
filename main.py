@@ -1,5 +1,5 @@
-# main.py — Diary app with section navigator, proxy media, images/audio/videos split, history=5
-import os, io, uuid, time, sqlite3, datetime
+# main.py — Diary app with section navigator, proxy media, merged media helpers, images/audio/videos split, history=5
+import os, io, re, uuid, time, sqlite3, datetime
 import streamlit as st
 import pandas as pd
 
@@ -35,6 +35,7 @@ from googleapiclient.http import MediaIoBaseDownload, MediaFileUpload
 
 DB_PATH = "journal.sqlite"
 
+# ---------- Google Drive ----------
 def drive_service():
     creds = Credentials.from_service_account_info(
         st.secrets["google_auth"],
@@ -107,8 +108,10 @@ def upload_to_drive(file, user) -> str:
         fh.write(file.getvalue())
     media = MediaFileUpload(tmp_path, mimetype=(file.type or "application/octet-stream"), resumable=False)
     created = svc.files().create(body=meta, media_body=media, fields="id", supportsAllDrives=True).execute()
-    try: os.remove(tmp_path)
-    except Exception: pass
+    try:
+        os.remove(tmp_path)
+    except Exception:
+        pass
     fid = created["id"]
     make_public_read(fid)  # not required for proxy, but nice if you ever share links
     return fid
@@ -118,19 +121,22 @@ def public_view_url(file_id: str) -> str:
 
 def drive_db_last_modified_rfc3339() -> str | None:
     f = get_drive_db_file()
-    if not f: return None
+    if not f:
+        return None
     svc = drive_service()
     meta = svc.files().get(fileId=f["id"], fields="modifiedTime").execute()
     return meta.get("modifiedTime")
 
 def local_db_mtime_epoch() -> float | None:
-    try: return os.path.getmtime(DB_PATH)
-    except FileNotFoundError: return None
+    try:
+        return os.path.getmtime(DB_PATH)
+    except FileNotFoundError:
+        return None
 
 def rfc3339_to_epoch(s: str) -> float:
     from datetime import timezone
-    s2 = s.replace('Z','')
-    fmt = "%Y-%m-%dT%H:%M:%S.%f" if '.' in s2 else "%Y-%m-%dT%H:%M:%S"
+    s2 = s.replace("Z", "")
+    fmt = "%Y-%m-%dT%H:%M:%S.%f" if "." in s2 else "%Y-%m-%dT%H:%M:%S"
     dt = datetime.datetime.strptime(s2, fmt)
     return dt.replace(tzinfo=datetime.timezone.utc).timestamp()
 
@@ -149,7 +155,7 @@ def fetch_drive_bytes(file_id: str) -> tuple[bytes, str]:
     buf.seek(0)
     return buf.read(), mime
 
-# -------- Get Drive file metadata including name --------
+# -------- Drive metadata helper (cached) --------
 @st.cache_data(show_spinner=False, ttl=3600)
 def get_drive_file_info(file_id: str) -> dict:
     """Get file metadata including original filename from Drive"""
@@ -159,12 +165,12 @@ def get_drive_file_info(file_id: str) -> dict:
         return {
             "name": meta.get("name", "unknown_file"),
             "mime": meta.get("mimeType", "").lower(),
-            "size": int(meta.get("size", 0))
+            "size": int(meta.get("size", 0)),
         }
     except Exception:
         return {"name": "unknown_file", "mime": "", "size": 0}
 
-# ---------------------------- DB ----------------------------
+# ---------- DB ----------
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
 
@@ -224,31 +230,18 @@ def ensure_db():
         if not download_db(DB_PATH):
             conn = sqlite3.connect(DB_PATH)
             conn.executescript(SCHEMA_SQL)
-            conn.commit(); conn.close()
+            conn.commit()
+            conn.close()
             upload_db(DB_PATH)
     else:
-        # Check if we need to add the original_name columns to existing tables
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        
-        # Check if original_name column exists in images table
-        cursor.execute("PRAGMA table_info(images)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if 'original_name' not in columns:
-            cursor.execute("ALTER TABLE images ADD COLUMN original_name TEXT")
-        
-        # Check if original_name column exists in audio table
-        cursor.execute("PRAGMA table_info(audio)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if 'original_name' not in columns:
-            cursor.execute("ALTER TABLE audio ADD COLUMN original_name TEXT")
-        
-        # Check if original_name column exists in videos table
-        cursor.execute("PRAGMA table_info(videos)")
-        columns = [col[1] for col in cursor.fetchall()]
-        if 'original_name' not in columns:
-            cursor.execute("ALTER TABLE videos ADD COLUMN original_name TEXT")
-        
+        # Ensure original_name exists on all media tables
+        for tbl in ("images", "audio", "videos"):
+            cursor.execute(f"PRAGMA table_info({tbl})")
+            cols = [c[1] for c in cursor.fetchall()]
+            if "original_name" not in cols:
+                cursor.execute(f"ALTER TABLE {tbl} ADD COLUMN original_name TEXT")
         conn.commit()
         conn.close()
 
@@ -270,6 +263,74 @@ def summarize_text(text, max_sentences=2):
     except Exception:
         return text.split("\n")[0][:300]
 
+# ---------- Filename fixes ----------
+def strip_upload_prefix(name: str) -> str:
+    """
+    Uploaded files are saved as `user-<epoch>-original.ext`.
+    Remove the leading `user-<epoch>-` if present.
+    """
+    if not name:
+        return name
+    return re.sub(r"^[^-]+-\d{9,}-", "", name)
+
+def resolve_display_name(file_id: str, original_name: str | None, fallback_label: str) -> str:
+    """
+    Prefer DB's original_name; otherwise use Drive's filename (stripped).
+    """
+    if original_name and original_name.strip():
+        return original_name.strip()
+    info = get_drive_file_info(file_id)
+    drive_name = strip_upload_prefix(info.get("name", "")) if info else ""
+    return drive_name or fallback_label
+
+# ---------- Generic media helpers (merge of images/audio/videos) ----------
+MEDIA_MAP = {
+    "images": {"table": "images"},
+    "audio":  {"table": "audio"},
+    "videos": {"table": "videos"},
+}
+
+def add_media(entry_id: str, uploaded_files, user: str, kind: str):
+    """Insert uploaded files of a media kind into its table."""
+    if not uploaded_files:
+        return
+    tbl = MEDIA_MAP[kind]["table"]
+    conn = get_conn(); cur = conn.cursor()
+    for f in uploaded_files:
+        fid = upload_to_drive(f, user)
+        cur.execute(
+            f"INSERT INTO {tbl} (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
+            (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name),
+        )
+    conn.commit(); conn.close(); upload_db(DB_PATH)
+
+def delete_media(media_id: str, kind: str):
+    """Delete a single media row by id for a given kind."""
+    tbl = MEDIA_MAP[kind]["table"]
+    conn = get_conn()
+    conn.execute(f"DELETE FROM {tbl} WHERE id=?", (media_id,))
+    conn.commit(); conn.close(); upload_db(DB_PATH)
+
+def list_media(entry_id: str, kind: str):
+    """Return [{id,file_id,url,mime,original_name}] for a given entry/kind."""
+    tbl = MEDIA_MAP[kind]["table"]
+    conn = get_conn(); cur = conn.cursor()
+    cur.execute(f"SELECT id, drive_file_id, mime, original_name FROM {tbl} WHERE entry_id=?", (entry_id,))
+    rows = cur.fetchall()
+    conn.close()
+    out = []
+    for (mid, fid, mime, name) in rows:
+        disp = resolve_display_name(fid, name, kind[:-1])  # "images"->"image"
+        out.append({
+            "id": mid,
+            "file_id": fid,
+            "url": public_view_url(fid),
+            "mime": mime,
+            "original_name": disp
+        })
+    return out
+
+# ---------- Entries CRUD ----------
 def save_entry_to_db(user, date, what, meaningful, mood, choice, no_repeat, plans, tags,
                      uploaded_images, uploaded_audio, uploaded_videos):
     entry_id = str(uuid.uuid4())
@@ -280,29 +341,14 @@ def save_entry_to_db(user, date, what, meaningful, mood, choice, no_repeat, plan
     c.execute("""INSERT INTO entries (id,user,date,what,meaningful,mood,choice,no_repeat,plans,tags,summary)
                  VALUES (?,?,?,?,?,?,?,?,?,?,?)""",
               (entry_id, user, date, what, meaningful, int(mood) if mood else None, choice, no_repeat, plans, tags_str, summary))
+    conn.commit(); conn.close()
 
-    for f in (uploaded_images or []):
-        fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO images (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
+    # add media (generic)
+    add_media(entry_id, uploaded_images, user, "images")
+    add_media(entry_id, uploaded_audio,  user, "audio")
+    add_media(entry_id, uploaded_videos, user, "videos")
 
-    for f in (uploaded_audio or []):
-        fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO audio (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
-
-    for f in (uploaded_videos or []):
-        fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO videos (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
-
-    for line in (plans or "").split("\n"):
-        t = line.strip()
-        if t:
-            c.execute("INSERT INTO tasks (id, entry_id, text, is_done) VALUES (?,?,?,0)",
-                      (str(uuid.uuid4()), entry_id, t))
-
-    conn.commit(); conn.close(); upload_db(DB_PATH)
+    upload_db(DB_PATH)
     return entry_id
 
 def list_entries_for_user(user, limit=100):
@@ -319,20 +365,20 @@ def load_entry_bundle(user, limit=5):
                  FROM entries WHERE user=? ORDER BY date DESC, created_at DESC LIMIT ?""", (user, limit))
     cols = [d[0] for d in c.description]
     entries = [dict(zip(cols, row)) for row in c.fetchall()]
+    conn.close()
+
     for e in entries:
         eid = e["id"]
-        c.execute("SELECT id, drive_file_id, mime, original_name FROM images WHERE entry_id=?", (eid,))
-        e["images"] = [{"id": iid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_image"} 
-                       for (iid, fid, mime, name) in c.fetchall()]
-        c.execute("SELECT id, drive_file_id, mime, original_name FROM audio WHERE entry_id=?", (eid,))
-        e["audio"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_audio"} 
-                      for (aid, fid, mime, name) in c.fetchall()]
-        c.execute("SELECT id, drive_file_id, mime, original_name FROM videos WHERE entry_id=?", (eid,))
-        e["videos"] = [{"id": vid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_video"} 
-                       for (vid, fid, mime, name) in c.fetchall()]
-        c.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (eid,))
-        e["tasks"] = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
-    conn.close(); return entries
+        e["images"] = list_media(eid, "images")
+        e["audio"]  = list_media(eid, "audio")
+        e["videos"] = list_media(eid, "videos")
+
+        # tasks
+        conn2 = get_conn(); cur2 = conn2.cursor()
+        cur2.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (eid,))
+        e["tasks"] = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in cur2.fetchall()]
+        conn2.close()
+    return entries
 
 def load_entry_detail(entry_id: str):
     conn = get_conn(); c = conn.cursor()
@@ -341,66 +387,12 @@ def load_entry_detail(entry_id: str):
     cols = [d[0] for d in c.description] if row else []
     entry = dict(zip(cols, row)) if row else None
     if entry:
-        c.execute("SELECT id, drive_file_id, mime, original_name FROM images WHERE entry_id=?", (entry_id,))
-        entry["images"] = [{"id": iid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_image"} 
-                           for (iid, fid, mime, name) in c.fetchall()]
-        c.execute("SELECT id, drive_file_id, mime, original_name FROM audio WHERE entry_id=?", (entry_id,))
-        entry["audio"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_audio"} 
-                          for (aid, fid, mime, name) in c.fetchall()]
-        c.execute("SELECT id, drive_file_id, mime, original_name FROM videos WHERE entry_id=?", (entry_id,))
-        entry["videos"] = [{"id": vid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_video"} 
-                           for (vid, fid, mime, name) in c.fetchall()]
+        entry["images"] = list_media(entry_id, "images")
+        entry["audio"]  = list_media(entry_id, "audio")
+        entry["videos"] = list_media(entry_id, "videos")
         c.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (entry_id,))
         entry["tasks"] = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
     conn.close(); return entry
-
-def update_entry(entry_id: str, fields: dict):
-    keys, vals = [], []
-    for k, v in fields.items():
-        keys.append(f"{k}=?"); vals.append(v)
-    vals.append(entry_id)
-    conn = get_conn()
-    conn.execute(f"UPDATE entries SET {', '.join(keys)} WHERE id=?", vals)
-    conn.commit(); conn.close(); upload_db(DB_PATH)
-
-def delete_image(image_id: str):
-    conn = get_conn(); conn.execute("DELETE FROM images WHERE id=?", (image_id,)); conn.commit(); conn.close(); upload_db(DB_PATH)
-
-def delete_audio(audio_id: str):
-    conn = get_conn(); conn.execute("DELETE FROM audio WHERE id=?", (audio_id,)); conn.commit(); conn.close(); upload_db(DB_PATH)
-
-def delete_video(video_id: str):
-    conn = get_conn(); conn.execute("DELETE FROM videos WHERE id=?", (video_id,)); conn.commit(); conn.close(); upload_db(DB_PATH)
-
-def delete_entry(entry_id: str):
-    conn = get_conn(); conn.execute("DELETE FROM entries WHERE id=?", (entry_id,)); conn.commit(); conn.close(); upload_db(DB_PATH)
-
-def add_images(entry_id: str, uploaded_files, user: str):
-    if not uploaded_files: return
-    conn = get_conn(); c = conn.cursor()
-    for f in uploaded_files:
-        fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO images (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
-    conn.commit(); conn.close(); upload_db(DB_PATH)
-
-def add_audio(entry_id: str, uploaded_files, user: str):
-    if not uploaded_files: return
-    conn = get_conn(); c = conn.cursor()
-    for f in uploaded_files:
-        fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO audio (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
-    conn.commit(); conn.close(); upload_db(DB_PATH)
-
-def add_videos(entry_id: str, uploaded_files, user: str):
-    if not uploaded_files: return
-    conn = get_conn(); c = conn.cursor()
-    for f in uploaded_files:
-        fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO videos (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
-    conn.commit(); conn.close(); upload_db(DB_PATH)
 
 def replace_tasks(entry_id: str, new_tasks: list[str]):
     conn = get_conn(); c = conn.cursor()
@@ -416,6 +408,43 @@ def update_task_done(task_id: str, is_done: bool):
     conn = get_conn()
     conn.execute("UPDATE tasks SET is_done=? WHERE id=?", (1 if is_done else 0, task_id))
     conn.commit(); conn.close(); upload_db(DB_PATH)
+
+def delete_entry(entry_id: str):
+    conn = get_conn(); conn.execute("DELETE FROM entries WHERE id=?", (entry_id,)); conn.commit(); conn.close(); upload_db(DB_PATH)
+
+# ---------- Utilities ----------
+def rfc3339_to_epoch_safe(s):
+    try:
+        return rfc3339_to_epoch(s)
+    except Exception:
+        return None
+
+def format_file_size(size_bytes):
+    """Convert bytes to human readable format"""
+    if size_bytes == 0:
+        return "0 B"
+    size_names = ["B", "KB", "MB", "GB"]
+    import math
+    i = int(math.floor(math.log(size_bytes, 1024)))
+    p = math.pow(1024, i)
+    s = round(size_bytes / p, 2)
+    return f"{s} {size_names[i]}"
+
+def create_download_button(file_id: str, original_name: str, media_type: str, key_suffix: str):
+    """Create a download button for media files"""
+    try:
+        data, _ = fetch_drive_bytes(file_id)
+        file_info = get_drive_file_info(file_id)
+        file_size = format_file_size(file_info.get("size", len(data)))
+        st.download_button(
+            label=f"📥 Download ({file_size})",
+            data=data,
+            file_name=original_name,
+            mime=file_info.get("mime", "application/octet-stream"),
+            key=f"download_{media_type}_{key_suffix}"
+        )
+    except Exception as e:
+        st.error(f"Error creating download button: {str(e)}")
 
 def backfill_make_public(user: str | None = None):
     conn = get_conn(); cur = conn.cursor()
@@ -434,38 +463,36 @@ def backfill_make_public(user: str | None = None):
     for fid in (img + aud + vid):
         make_public_read(fid)
 
-# Helper function to format file size
-def format_file_size(size_bytes):
-    """Convert bytes to human readable format"""
-    if size_bytes == 0:
-        return "0 B"
-    size_names = ["B", "KB", "MB", "GB"]
-    import math
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_names[i]}"
-
-# Helper function to create download button for media files
-def create_download_button(file_id: str, original_name: str, media_type: str, key_suffix: str):
-    """Create a download button for media files"""
-    try:
-        data, _ = fetch_drive_bytes(file_id)
-        file_info = get_drive_file_info(file_id)
-        file_size = format_file_size(file_info.get("size", len(data)))
-        
-        st.download_button(
-            label=f"📥 Download ({file_size})",
-            data=data,
-            file_name=original_name,
-            mime=file_info.get("mime", "application/octet-stream"),
-            key=f"download_{media_type}_{key_suffix}"
-        )
-    except Exception as e:
-        st.error(f"Error creating download button: {str(e)}")
+def backfill_original_names(user: str | None = None):
+    """
+    Populate original_name in images/audio/videos where it's NULL or empty,
+    using Drive metadata (with upload prefix stripped).
+    """
+    conn = get_conn(); cur = conn.cursor()
+    tables = ["images", "audio", "videos"]
+    for tbl in tables:
+        if user:
+            cur.execute(f"""
+                SELECT {tbl}.id, {tbl}.drive_file_id
+                FROM {tbl} JOIN entries e ON e.id = {tbl}.entry_id
+                WHERE ( {tbl}.original_name IS NULL OR TRIM({tbl}.original_name)='' )
+                  AND e.user = ?
+            """, (user,))
+        else:
+            cur.execute(f"""
+                SELECT id, drive_file_id FROM {tbl}
+                WHERE ( original_name IS NULL OR TRIM(original_name)='' )
+            """)
+        rows = cur.fetchall()
+        for row_id, fid in rows:
+            info = get_drive_file_info(fid)
+            name = strip_upload_prefix(info.get("name", "")) if info else ""
+            if not name:
+                name = "file" if tbl == "images" else ("audio" if tbl == "audio" else "video")
+            conn.execute(f"UPDATE {tbl} SET original_name=? WHERE id=?", (name, row_id))
+    conn.commit(); conn.close(); upload_db(DB_PATH)
 
 # ---------------------------- Enhanced Monthly Reflection ----------------------------
-
 def llm_monthly_summary(user: str, year: int, month: int) -> str:
     """
     Generate a monthly reflection from diary entries using OpenAI GPT or fallback.
@@ -475,7 +502,6 @@ def llm_monthly_summary(user: str, year: int, month: int) -> str:
     start = datetime.date(year, month, 1)
     end = (datetime.date(year+1,1,1)-datetime.timedelta(days=1)) if month==12 else (datetime.date(year,month+1,1)-datetime.timedelta(days=1))
 
-    # Get entries for the month
     df = pd.read_sql_query(
         """
         SELECT date, what, meaningful, mood, choice, no_repeat, plans, tags FROM entries
@@ -489,7 +515,6 @@ def llm_monthly_summary(user: str, year: int, month: int) -> str:
     if df.empty:
         return "No entries found for this month. Start journaling to get personalized monthly reflections!"
 
-    # Format entries for the LLM
     lines = []
     for _, r in df.iterrows():
         entry_parts = []
@@ -501,10 +526,8 @@ def llm_monthly_summary(user: str, year: int, month: int) -> str:
         if r['plans']: entry_parts.append(f"Plans: {str(r['plans'])}")
         if r['tags']: entry_parts.append(f"Tags: {str(r['tags'])}")
         lines.append(f"{r['date']}: {' | '.join(entry_parts)}")
-
     digest = "\n".join(lines)
 
-    # Try OpenAI first
     if OPENAI_AVAILABLE:
         try:
             prompt = ("""You are a helpful, concise coach. 
@@ -519,7 +542,6 @@ def llm_monthly_summary(user: str, year: int, month: int) -> str:
             and must stay under 200 words. 
             Entries:
             """ + digest)
-
             resp = client.chat.completions.create(
                 model="gpt-4o-mini",
                 messages=[
@@ -532,44 +554,26 @@ def llm_monthly_summary(user: str, year: int, month: int) -> str:
         except Exception as e:
             st.warning(f"OpenAI API failed: {str(e)}. Using fallback method.")
 
-    # Fallback method: template-based reflection
     return generate_fallback_reflection_from_entries(df)
 
-
 def generate_fallback_reflection_from_entries(df) -> str:
-    """
-    Generate a structured reflection when OpenAI is not available.
-    Analyzes patterns in the dataframe and creates a coaching-style reflection.
-    """
     total_entries = len(df)
-
-    # Analyze mood patterns
     mood_scores = df['mood'].dropna()
     avg_mood = mood_scores.mean() if not mood_scores.empty else None
-
-    # Analyze recurring themes in tags
     all_tags = []
     for tags in df['tags'].dropna():
         all_tags.extend([tag.strip().lower() for tag in str(tags).split(',') if tag.strip()])
     common_tags = pd.Series(all_tags).value_counts().head(3).index.tolist() if all_tags else []
-
-    # Count meaningful entries
     meaningful_count = df['meaningful'].notna().sum()
-
-    # Analyze what they don't want to repeat
     struggles_mentioned = df['no_repeat'].notna().sum()
 
-    # Build reflection paragraph
     reflection_parts = []
-
-    # Opening with patterns
     if avg_mood is not None:
         mood_desc = "positive" if avg_mood >= 7 else "mixed" if avg_mood >= 5 else "challenging"
         reflection_parts.append(f"Over the past month, you maintained consistent journaling with {total_entries} entries, showing a generally {mood_desc} emotional trend")
     else:
         reflection_parts.append(f"Over the past month, you maintained consistent journaling with {total_entries} entries")
 
-    # Wins and achievements
     wins = []
     if meaningful_count > total_entries * 0.5:
         wins.append("finding meaning in daily experiences")
@@ -577,44 +581,31 @@ def generate_fallback_reflection_from_entries(df) -> str:
         wins.append(f"focusing on key themes like {', '.join(common_tags[:2])}")
     if not wins:
         wins.append("maintaining consistent self-reflection")
-
     reflection_parts.append(f". Key wins include {' and '.join(wins)}")
 
-    # Struggles
     if struggles_mentioned > 0:
         reflection_parts.append(f". You identified {struggles_mentioned} areas for improvement, showing good self-awareness about challenging patterns")
 
-    # Three actionable suggestions
     suggestions = [
         "establish a consistent daily reflection routine to deepen your self-awareness and track progress more effectively",
         "focus on identifying specific triggers and contexts around the experiences you want to change or avoid",
         "celebrate small wins more deliberately by noting positive patterns and achievements in your entries"
     ]
-
     reflection_parts.append(f". To enhance next month, consider three steps: (1) {suggestions[0]}; (2) {suggestions[1]}; and (3) {suggestions[2]}. These approaches should help you build on your reflective practice and create more intentional growth.")
-
     return "".join(reflection_parts)
 
-
 def render_enhanced_monthly_summary_section():
-    """
-    Enhanced UI section for monthly summaries with better formatting and options.
-    """
     st.subheader("🗓️ 每月總結 / Monthly Summary")
-
     now = datetime.date.today()
-
-    # Date selection with better UX
     col1, col2, col3 = st.columns([2, 2, 2])
     with col1:
         year = st.number_input("Year", min_value=2000, max_value=2100, value=now.year, step=1)
     with col2:
         month = st.number_input("Month", min_value=1, max_value=12, value=now.month, step=1)
     with col3:
-        st.write("")  # spacing
+        st.write("")
         generate_btn = st.button("🎯 Generate Summary", type="primary")
 
-    # Quick month selection buttons
     st.write("Quick select:")
     q1, q2, q3 = st.columns(3)
     with q1:
@@ -641,16 +632,11 @@ def render_enhanced_monthly_summary_section():
             summary_text = llm_monthly_summary(user, int(year), int(month))
 
         st.success(f"✅ Monthly reflection for {int(year)}-{int(month):02d} generated!")
-
-        # Display with nice formatting
         st.markdown("### 📋 Your Monthly Reflection")
         st.markdown(f"**{datetime.date(int(year), int(month), 1).strftime('%B %Y')}**")
-
-        # Add the reflection in a nice container
         with st.container():
             st.markdown(f"> {summary_text}")
 
-        # Option to save or export
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
         filename = f"monthly_reflection_{int(year)}_{int(month):02d}_{timestamp}.txt"
         st.download_button(
@@ -663,15 +649,11 @@ def render_enhanced_monthly_summary_section():
 # ---------------------------- UI ----------------------------
 st.set_page_config(page_title="Sanny's Diary", page_icon="🌀", layout="centered")
 st.title("🌀 迷惘但想搞懂的我 / Lost but Learning")
-st.caption("SQLite in Google Drive • Proxy media • Images/Audio/Videos split • History=5 • Smart Search • LLM Monthly")
+st.caption("SQLite in Google Drive • Proxy media • Images/Audio/Videos merged helpers • History=5 • Smart Search • LLM Monthly")
 
 ensure_db()
 
 # Update banner
-def rfc3339_to_epoch_safe(s):
-    try: return rfc3339_to_epoch(s)
-    except Exception: return None
-
 drive_ts = drive_db_last_modified_rfc3339()
 local_ts = local_db_mtime_epoch()
 if drive_ts:
@@ -727,7 +709,7 @@ elif section == "Recent Entries":
             if e["meaningful"]:
                 st.markdown(f"**Meaningful:** {e['meaningful']}")
 
-            # Enhanced Images section with filenames and download
+            # Images
             if e.get("images"):
                 st.write("**Images:**")
                 for i, img in enumerate(e["images"]):
@@ -739,7 +721,7 @@ elif section == "Recent Entries":
                         st.write(f"**{img['original_name']}**")
                         create_download_button(img["file_id"], img["original_name"], "image", f"{e['id']}_{i}")
 
-            # Enhanced Audio section with filenames and download
+            # Audio
             if e.get("audio"):
                 st.write("**Audio:**")
                 for i, aud in enumerate(e["audio"]):
@@ -757,7 +739,7 @@ elif section == "Recent Entries":
                         st.write(f"**{aud['original_name']}**")
                         create_download_button(aud["file_id"], aud["original_name"], "audio", f"{e['id']}_{i}")
 
-            # Enhanced Videos section with filenames and download
+            # Videos
             if e.get("videos"):
                 st.write("**Videos:**")
                 for i, vid in enumerate(e["videos"]):
@@ -779,8 +761,7 @@ elif section == "Recent Entries":
 
             if st.button("🗑️ 刪除這筆 / Delete this entry", key=f"del-entry-{e['id']}"):
                 delete_entry(e["id"]); st.success("Entry deleted."); st.rerun()
-            
-            st.markdown("---")  # Add separator between entries
+            st.markdown("---")
 
 elif section == "Edit Past Entry":
     st.subheader("✏️ 編輯過去日記 / Edit Past Entry")
@@ -810,7 +791,6 @@ elif section == "Edit Past Entry":
                     add_vids = st.file_uploader("新增影片 / Add videos", type=["mp4","webm","mov","mkv"], accept_multiple_files=True)
                     submitted_edit = st.form_submit_button("儲存變更 / Save changes")
 
-                # Enhanced existing media display with filenames and download
                 if entry.get("images"):
                     st.write("現有圖片 / Existing images:")
                     for i, img in enumerate(entry["images"]):
@@ -822,7 +802,7 @@ elif section == "Edit Past Entry":
                             create_download_button(img["file_id"], img["original_name"], "image", f"edit_{sel_id}_{i}")
                         with col3:
                             if st.button("刪除 / Delete", key=f"del-img-{img['id']}"):
-                                delete_image(img["id"]); st.rerun()
+                                delete_media(img["id"], "images"); st.rerun()
 
                 if entry.get("audio"):
                     st.write("現有音訊 / Existing audio:")
@@ -841,7 +821,7 @@ elif section == "Edit Past Entry":
                             create_download_button(aud["file_id"], aud["original_name"], "audio", f"edit_{sel_id}_{i}")
                         with col3:
                             if st.button("刪除 / Delete", key=f"del-aud-{aud['id']}"):
-                                delete_audio(aud["id"]); st.rerun()
+                                delete_media(aud["id"], "audio"); st.rerun()
 
                 if entry.get("videos"):
                     st.write("現有影片 / Existing videos:")
@@ -855,20 +835,26 @@ elif section == "Edit Past Entry":
                             create_download_button(vid["file_id"], vid["original_name"], "video", f"edit_{sel_id}_{i}")
                         with col3:
                             if st.button("刪除 / Delete", key=f"del-vid-{vid['id']}"):
-                                delete_video(vid["id"]); st.rerun()
+                                delete_media(vid["id"], "videos"); st.rerun()
 
                 if submitted_edit:
                     summary = summarize_text(new_what)
-                    update_entry(sel_id, {
-                        "date": new_date, "what": new_what, "meaningful": new_meaningful,
-                        "mood": int(new_mood), "choice": new_choice, "no_repeat": new_no_repeat,
-                        "plans": new_plans, "tags": ", ".join([t.strip() for t in (new_tags or '').split(',') if t.strip()]),
-                        "summary": summary
-                    })
+                    conn = get_conn()
+                    conn.execute(
+                        "UPDATE entries SET date=?, what=?, meaningful=?, mood=?, choice=?, no_repeat=?, plans=?, tags=?, summary=? WHERE id=?",
+                        (
+                            new_date, new_what, new_meaningful, int(new_mood),
+                            new_choice, new_no_repeat, new_plans,
+                            ", ".join([t.strip() for t in (new_tags or '').split(',') if t.strip()]),
+                            summary, sel_id
+                        ),
+                    )
+                    conn.commit(); conn.close(); upload_db(DB_PATH)
+
                     replace_tasks(sel_id, new_plans.split("\n") if new_plans else [])
-                    add_images(sel_id, add_imgs, user)
-                    add_audio(sel_id, add_auds, user)
-                    add_videos(sel_id, add_vids, user)
+                    add_media(sel_id, add_imgs, user, "images")
+                    add_media(sel_id, add_auds, user, "audio")
+                    add_media(sel_id, add_vids, user, "videos")
                     st.success("已更新！DB 已同步到 Google Drive ✅"); st.rerun()
 
 elif section == "Search Results":
@@ -928,7 +914,6 @@ elif section == "Search Results":
                 st.markdown("---")
 
 elif section == "Monthly Summary":
-    # Use the enhanced monthly summary renderer
     render_enhanced_monthly_summary_section()
 
 elif section == "Export":
@@ -945,5 +930,10 @@ elif section == "Export":
 elif section == "Settings":
     st.subheader("⚙️ Settings")
     st.write("資料永久保存：DB 與附件都在 Google Drive（媒體以代理模式顯示）。")
-    if st.button("Make my attachments public (anyone with link)"):
-        backfill_make_public(user); st.success("Done.")
+    c1, c2 = st.columns(2)
+    with c1:
+        if st.button("Make my attachments public (anyone with link)"):
+            backfill_make_public(user); st.success("Done.")
+    with c2:
+        if st.button("Backfill missing filenames"):
+            backfill_original_names(user); st.success("Filenames updated from Drive metadata.")
