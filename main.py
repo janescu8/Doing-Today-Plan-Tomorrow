@@ -649,7 +649,7 @@ elif section == "Monthly Summary":
                     and conclude with three specific, actionable suggestions to improve the coming month. 
                     Keep the entire reflection under 500 words.""")
                     resp = openai.ChatCompletion.create(
-                        model="gpt-3.5-turbo",
+                        model="gpt-5",
                         messages=[{"role":"system","content":"You are a helpful, concise coach."},
                                   {"role":"user","content": prompt}],
                         temperature=0.5,
