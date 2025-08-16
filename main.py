@@ -383,6 +383,202 @@ def backfill_make_public(user: str | None = None):
     for fid in (img + aud + vid):
         make_public_read(fid)
 
+# ---------------------------- Enhanced Monthly Reflection ----------------------------
+
+def llm_monthly_summary(user: str, year: int, month: int) -> str:
+    """
+    Generate a monthly reflection from diary entries using OpenAI GPT or fallback.
+    Returns a cohesive paragraph with patterns, wins, struggles, and 3 actionable suggestions.
+    """
+    conn = get_conn()
+    start = datetime.date(year, month, 1)
+    end = (datetime.date(year+1,1,1)-datetime.timedelta(days=1)) if month==12 else (datetime.date(year,month+1,1)-datetime.timedelta(days=1))
+
+    # Get entries for the month
+    df = pd.read_sql_query(
+        """
+        SELECT date, what, meaningful, mood, choice, no_repeat, plans, tags FROM entries
+        WHERE user = ? AND date BETWEEN ? AND ?
+        ORDER BY date ASC
+        """,
+        conn, params=(user, start.isoformat(), end.isoformat())
+    )
+    conn.close()
+
+    if df.empty:
+        return "No entries found for this month. Start journaling to get personalized monthly reflections!"
+
+    # Format entries for the LLM
+    lines = []
+    for _, r in df.iterrows():
+        entry_parts = []
+        if r['what']: entry_parts.append(str(r['what']))
+        if r['meaningful']: entry_parts.append(f"Meaningful: {str(r['meaningful'])}")
+        if pd.notnull(r['mood']): entry_parts.append(f"Mood: {str(r['mood'])}")
+        if r['choice']: entry_parts.append(f"Choice: {str(r['choice'])}")
+        if r['no_repeat']: entry_parts.append(f"Won't repeat: {str(r['no_repeat'])}")
+        if r['plans']: entry_parts.append(f"Plans: {str(r['plans'])}")
+        if r['tags']: entry_parts.append(f"Tags: {str(r['tags'])}")
+        lines.append(f"{r['date']}: {' | '.join(entry_parts)}")
+
+    digest = "\n".join(lines)
+
+    # Try OpenAI first
+    if OPENAI_AVAILABLE:
+        try:
+            prompt = ("""You are a helpful, concise coach. 
+            From the following daily diary entries, produce a SINGLE cohesive paragraph that serves as a monthly reflection. 
+            Do NOT list or repeat individual daily logs. Instead, synthesize them into:
+            - Patterns and recurring themes across the month
+            - Key wins and achievements
+            - Main struggles or challenges
+            - Exactly three actionable suggestions for improvement next month
+            
+            The output must be written as smooth prose (not bullet points, not a log), 
+            and must stay under 200 words. 
+            Entries:
+            """ + digest)
+
+            resp = openai.ChatCompletion.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role":"system","content":"You are a helpful, concise coach."},
+                    {"role":"user","content": prompt}
+                ],
+                temperature=0.5,
+            )
+            return resp.choices[0].message["content"].strip()
+        except Exception as e:
+            st.warning(f"OpenAI API failed: {str(e)}. Using fallback method.")
+
+    # Fallback method: template-based reflection
+    return generate_fallback_reflection_from_entries(df)
+
+
+def generate_fallback_reflection_from_entries(df) -> str:
+    """
+    Generate a structured reflection when OpenAI is not available.
+    Analyzes patterns in the dataframe and creates a coaching-style reflection.
+    """
+    total_entries = len(df)
+
+    # Analyze mood patterns
+    mood_scores = df['mood'].dropna()
+    avg_mood = mood_scores.mean() if not mood_scores.empty else None
+
+    # Analyze recurring themes in tags
+    all_tags = []
+    for tags in df['tags'].dropna():
+        all_tags.extend([tag.strip().lower() for tag in str(tags).split(',') if tag.strip()])
+    common_tags = pd.Series(all_tags).value_counts().head(3).index.tolist() if all_tags else []
+
+    # Count meaningful entries
+    meaningful_count = df['meaningful'].notna().sum()
+
+    # Analyze what they don't want to repeat
+    struggles_mentioned = df['no_repeat'].notna().sum()
+
+    # Build reflection paragraph
+    reflection_parts = []
+
+    # Opening with patterns
+    if avg_mood is not None:
+        mood_desc = "positive" if avg_mood >= 7 else "mixed" if avg_mood >= 5 else "challenging"
+        reflection_parts.append(f"Over the past month, you maintained consistent journaling with {total_entries} entries, showing a generally {mood_desc} emotional trend")
+    else:
+        reflection_parts.append(f"Over the past month, you maintained consistent journaling with {total_entries} entries")
+
+    # Wins and achievements
+    wins = []
+    if meaningful_count > total_entries * 0.5:
+        wins.append("finding meaning in daily experiences")
+    if common_tags:
+        wins.append(f"focusing on key themes like {', '.join(common_tags[:2])}")
+    if not wins:
+        wins.append("maintaining consistent self-reflection")
+
+    reflection_parts.append(f". Key wins include {' and '.join(wins)}")
+
+    # Struggles
+    if struggles_mentioned > 0:
+        reflection_parts.append(f". You identified {struggles_mentioned} areas for improvement, showing good self-awareness about challenging patterns")
+
+    # Three actionable suggestions
+    suggestions = [
+        "establish a consistent daily reflection routine to deepen your self-awareness and track progress more effectively",
+        "focus on identifying specific triggers and contexts around the experiences you want to change or avoid",
+        "celebrate small wins more deliberately by noting positive patterns and achievements in your entries"
+    ]
+
+    reflection_parts.append(f". To enhance next month, consider three steps: (1) {suggestions[0]}; (2) {suggestions[1]}; and (3) {suggestions[2]}. These approaches should help you build on your reflective practice and create more intentional growth.")
+
+    return "".join(reflection_parts)
+
+
+def render_enhanced_monthly_summary_section():
+    """
+    Enhanced UI section for monthly summaries with better formatting and options.
+    """
+    st.subheader("🗓️ 每月總結 / Monthly Summary")
+
+    now = datetime.date.today()
+
+    # Date selection with better UX
+    col1, col2, col3 = st.columns([2, 2, 2])
+    with col1:
+        year = st.number_input("Year", min_value=2000, max_value=2100, value=now.year, step=1)
+    with col2:
+        month = st.number_input("Month", min_value=1, max_value=12, value=now.month, step=1)
+    with col3:
+        st.write("")  # spacing
+        generate_btn = st.button("🎯 Generate Summary", type="primary")
+
+    # Quick month selection buttons
+    st.write("Quick select:")
+    q1, q2, q3 = st.columns(3)
+    with q1:
+        if st.button("This Month"):
+            year, month = now.year, now.month
+            st.rerun()
+    with q2:
+        if st.button("Last Month"):
+            if now.month == 1:
+                year, month = now.year - 1, 12
+            else:
+                year, month = now.year, now.month - 1
+            st.rerun()
+    with q3:
+        if st.button("Two Months Ago"):
+            if now.month <= 2:
+                year, month = now.year - 1, now.month + 10
+            else:
+                year, month = now.year, now.month - 2
+            st.rerun()
+
+    if generate_btn:
+        with st.spinner("Generating your personalized monthly reflection..."):
+            summary_text = llm_monthly_summary(user, int(year), int(month))
+
+        st.success(f"✅ Monthly reflection for {int(year)}-{int(month):02d} generated!")
+
+        # Display with nice formatting
+        st.markdown("### 📋 Your Monthly Reflection")
+        st.markdown(f"**{datetime.date(int(year), int(month), 1).strftime('%B %Y')}**")
+
+        # Add the reflection in a nice container
+        with st.container():
+            st.markdown(f"> {summary_text}")
+
+        # Option to save or export
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        filename = f"monthly_reflection_{int(year)}_{int(month):02d}_{timestamp}.txt"
+        st.download_button(
+            label="📥 Download Reflection",
+            data=summary_text,
+            file_name=filename,
+            mime="text/plain"
+        )
+
 # ---------------------------- UI ----------------------------
 st.set_page_config(page_title="Sanny’s Diary", page_icon="🌀", layout="centered")
 st.title("🌀 迷惘但想搞懂的我 / Lost but Learning")
@@ -587,7 +783,7 @@ elif section == "Search Results":
             for tok in q_tokens:
                 if tok in text_fields: score += 3
             for t in tag_tokens:
-                if t in (row.get("tags","").lower()): score += 2
+                if t in (row.get("tags"," ").lower()): score += 2
             mood = row.get("mood", None)
             if mood is not None:
                 try:
@@ -620,66 +816,8 @@ elif section == "Search Results":
                 st.markdown("---")
 
 elif section == "Monthly Summary":
-    st.subheader("🗓️ 每月總結 / Monthly Summary")
-    now = datetime.date.today()
-    coly, colm = st.columns(2)
-    year = coly.number_input("Year", min_value=2000, max_value=2100, value=now.year, step=1)
-    month = colm.number_input("Month", min_value=1, max_value=12, value=now.month, step=1)
-    if st.button("Generate Monthly Summary"):
-        def llm_monthly_summary(user: str, year: int, month: int) -> str:
-            conn = get_conn()
-            start = datetime.date(year, month, 1)
-            end = (datetime.date(year+1,1,1)-datetime.timedelta(days=1)) if month==12 else (datetime.date(year,month+1,1)-datetime.timedelta(days=1))
-            df = pd.read_sql_query("""
-                SELECT date, what, meaningful, mood, tags FROM entries
-                WHERE user = ? AND date BETWEEN ? AND ?
-                ORDER BY date ASC
-            """, conn, params=(user, start.isoformat(), end.isoformat()))
-            conn.close()
-            if df.empty: return "No entries this month."
-            lines = []
-            for _, r in df.iterrows():
-                lines.append(f"{r['date']}: {str(r['what'] or '')} | Meaningful: {str(r['meaningful'] or '')} | Mood: {str(r['mood'] or '')} | Tags: {str(r['tags'] or '')}")
-            digest = "\n".join(lines)
-            if OPENAI_AVAILABLE:
-                try:
-                    prompt = ("""You are a helpful, concise coach. 
-                    From the following daily diary entries, produce a SINGLE cohesive paragraph that serves as a monthly reflection. 
-                    Do NOT list or repeat individual daily logs. Instead, synthesize them into:
-                    - Patterns and recurring themes across the month
-                    - Key wins and achievements
-                    - Main struggles or challenges
-                    - Exactly three actionable suggestions for improvement next month
-                    
-                    The output must be written as smooth prose (not bullet points, not a log), 
-                    and must stay under 200 words. 
-            
-                    Entries:
-                    """ + digest)
-            
-                    resp = openai.ChatCompletion.create(
-                        model="gpt-4o-mini",   # upgrade here
-                        messages=[{"role":"system","content":"You are a helpful, concise coach."},
-                                  {"role":"user","content": prompt}],
-                        temperature=0.5,
-                    )
-                    return resp.choices[0].message["content"].strip()
-                except Exception:
-                    pass
-
-            if LsaSummarizer is None: return digest[:1000]
-            try:
-                parser = PlaintextParser.from_string(digest, Tokenizer("english"))
-                summ = LsaSummarizer()
-                sents = summ(parser.document, 6)
-                return " ".join(str(s) for s in sents)
-            except Exception:
-                return digest[:1000]
-
-        with st.spinner("Summarizing…"):
-            summary_text = llm_monthly_summary(user, int(year), int(month))
-        st.success("Done!")
-        st.write(summary_text)
+    # Use the enhanced monthly summary renderer
+    render_enhanced_monthly_summary_section()
 
 elif section == "Export":
     st.subheader("📤 匯出 / Export")
