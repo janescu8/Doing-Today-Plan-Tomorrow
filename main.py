@@ -647,7 +647,7 @@ elif section == "Monthly Summary":
                     craft a single‑paragraph monthly reflection. Identify recurring patterns and themes across the month, 
                     celebrate notable wins, acknowledge ongoing struggles or challenges, 
                     and conclude with three specific, actionable suggestions to improve the coming month. 
-                    Keep the entire reflection under 500 words.""")
+                    Keep the entire reflection under 500 words.""" + digest)
                     resp = openai.ChatCompletion.create(
                         model="gpt-5",
                         messages=[{"role":"system","content":"You are a helpful, concise coach."},
