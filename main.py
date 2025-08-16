@@ -149,6 +149,21 @@ def fetch_drive_bytes(file_id: str) -> tuple[bytes, str]:
     buf.seek(0)
     return buf.read(), mime
 
+# -------- Get Drive file metadata including name --------
+@st.cache_data(show_spinner=False, ttl=3600)
+def get_drive_file_info(file_id: str) -> dict:
+    """Get file metadata including original filename from Drive"""
+    svc = drive_service()
+    try:
+        meta = svc.files().get(fileId=file_id, fields="name,mimeType,size").execute()
+        return {
+            "name": meta.get("name", "unknown_file"),
+            "mime": meta.get("mimeType", "").lower(),
+            "size": int(meta.get("size", 0))
+        }
+    except Exception:
+        return {"name": "unknown_file", "mime": "", "size": 0}
+
 # ---------------------------- DB ----------------------------
 SCHEMA_SQL = """
 PRAGMA foreign_keys = ON;
@@ -173,6 +188,7 @@ CREATE TABLE IF NOT EXISTS images (
   entry_id TEXT NOT NULL,
   drive_file_id TEXT NOT NULL,
   mime TEXT,
+  original_name TEXT,
   FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
 );
 
@@ -181,6 +197,7 @@ CREATE TABLE IF NOT EXISTS audio (
   entry_id TEXT NOT NULL,
   drive_file_id TEXT NOT NULL,
   mime TEXT,
+  original_name TEXT,
   FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
 );
 
@@ -189,6 +206,7 @@ CREATE TABLE IF NOT EXISTS videos (
   entry_id TEXT NOT NULL,
   drive_file_id TEXT NOT NULL,
   mime TEXT,
+  original_name TEXT,
   FOREIGN KEY(entry_id) REFERENCES entries(id) ON DELETE CASCADE
 );
 
@@ -208,6 +226,31 @@ def ensure_db():
             conn.executescript(SCHEMA_SQL)
             conn.commit(); conn.close()
             upload_db(DB_PATH)
+    else:
+        # Check if we need to add the original_name columns to existing tables
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        
+        # Check if original_name column exists in images table
+        cursor.execute("PRAGMA table_info(images)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'original_name' not in columns:
+            cursor.execute("ALTER TABLE images ADD COLUMN original_name TEXT")
+        
+        # Check if original_name column exists in audio table
+        cursor.execute("PRAGMA table_info(audio)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'original_name' not in columns:
+            cursor.execute("ALTER TABLE audio ADD COLUMN original_name TEXT")
+        
+        # Check if original_name column exists in videos table
+        cursor.execute("PRAGMA table_info(videos)")
+        columns = [col[1] for col in cursor.fetchall()]
+        if 'original_name' not in columns:
+            cursor.execute("ALTER TABLE videos ADD COLUMN original_name TEXT")
+        
+        conn.commit()
+        conn.close()
 
 def get_conn():
     conn = sqlite3.connect(DB_PATH, check_same_thread=False)
@@ -240,18 +283,18 @@ def save_entry_to_db(user, date, what, meaningful, mood, choice, no_repeat, plan
 
     for f in (uploaded_images or []):
         fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO images (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+        c.execute("INSERT INTO images (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
 
     for f in (uploaded_audio or []):
         fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO audio (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+        c.execute("INSERT INTO audio (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
 
     for f in (uploaded_videos or []):
         fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO videos (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+        c.execute("INSERT INTO videos (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
 
     for line in (plans or "").split("\n"):
         t = line.strip()
@@ -278,12 +321,15 @@ def load_entry_bundle(user, limit=5):
     entries = [dict(zip(cols, row)) for row in c.fetchall()]
     for e in entries:
         eid = e["id"]
-        c.execute("SELECT id, drive_file_id, mime FROM images WHERE entry_id=?", (eid,))
-        e["images"] = [{"id": iid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (iid, fid, mime) in c.fetchall()]
-        c.execute("SELECT id, drive_file_id, mime FROM audio WHERE entry_id=?", (eid,))
-        e["audio"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (aid, fid, mime) in c.fetchall()]
-        c.execute("SELECT id, drive_file_id, mime FROM videos WHERE entry_id=?", (eid,))
-        e["videos"] = [{"id": vid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (vid, fid, mime) in c.fetchall()]
+        c.execute("SELECT id, drive_file_id, mime, original_name FROM images WHERE entry_id=?", (eid,))
+        e["images"] = [{"id": iid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_image"} 
+                       for (iid, fid, mime, name) in c.fetchall()]
+        c.execute("SELECT id, drive_file_id, mime, original_name FROM audio WHERE entry_id=?", (eid,))
+        e["audio"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_audio"} 
+                      for (aid, fid, mime, name) in c.fetchall()]
+        c.execute("SELECT id, drive_file_id, mime, original_name FROM videos WHERE entry_id=?", (eid,))
+        e["videos"] = [{"id": vid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_video"} 
+                       for (vid, fid, mime, name) in c.fetchall()]
         c.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (eid,))
         e["tasks"] = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
     conn.close(); return entries
@@ -295,12 +341,15 @@ def load_entry_detail(entry_id: str):
     cols = [d[0] for d in c.description] if row else []
     entry = dict(zip(cols, row)) if row else None
     if entry:
-        c.execute("SELECT id, drive_file_id, mime FROM images WHERE entry_id=?", (entry_id,))
-        entry["images"] = [{"id": iid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (iid, fid, mime) in c.fetchall()]
-        c.execute("SELECT id, drive_file_id, mime FROM audio WHERE entry_id=?", (entry_id,))
-        entry["audio"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (aid, fid, mime) in c.fetchall()]
-        c.execute("SELECT id, drive_file_id, mime FROM videos WHERE entry_id=?", (entry_id,))
-        entry["videos"] = [{"id": vid, "file_id": fid, "url": public_view_url(fid), "mime": mime} for (vid, fid, mime) in c.fetchall()]
+        c.execute("SELECT id, drive_file_id, mime, original_name FROM images WHERE entry_id=?", (entry_id,))
+        entry["images"] = [{"id": iid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_image"} 
+                           for (iid, fid, mime, name) in c.fetchall()]
+        c.execute("SELECT id, drive_file_id, mime, original_name FROM audio WHERE entry_id=?", (entry_id,))
+        entry["audio"] = [{"id": aid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_audio"} 
+                          for (aid, fid, mime, name) in c.fetchall()]
+        c.execute("SELECT id, drive_file_id, mime, original_name FROM videos WHERE entry_id=?", (entry_id,))
+        entry["videos"] = [{"id": vid, "file_id": fid, "url": public_view_url(fid), "mime": mime, "original_name": name or "unknown_video"} 
+                           for (vid, fid, mime, name) in c.fetchall()]
         c.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (entry_id,))
         entry["tasks"] = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in c.fetchall()]
     conn.close(); return entry
@@ -331,8 +380,8 @@ def add_images(entry_id: str, uploaded_files, user: str):
     conn = get_conn(); c = conn.cursor()
     for f in uploaded_files:
         fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO images (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+        c.execute("INSERT INTO images (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
     conn.commit(); conn.close(); upload_db(DB_PATH)
 
 def add_audio(entry_id: str, uploaded_files, user: str):
@@ -340,8 +389,8 @@ def add_audio(entry_id: str, uploaded_files, user: str):
     conn = get_conn(); c = conn.cursor()
     for f in uploaded_files:
         fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO audio (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+        c.execute("INSERT INTO audio (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
     conn.commit(); conn.close(); upload_db(DB_PATH)
 
 def add_videos(entry_id: str, uploaded_files, user: str):
@@ -349,8 +398,8 @@ def add_videos(entry_id: str, uploaded_files, user: str):
     conn = get_conn(); c = conn.cursor()
     for f in uploaded_files:
         fid = upload_to_drive(f, user)
-        c.execute("INSERT INTO videos (id, entry_id, drive_file_id, mime) VALUES (?,?,?,?)",
-                  (str(uuid.uuid4()), entry_id, fid, f.type or ""))
+        c.execute("INSERT INTO videos (id, entry_id, drive_file_id, mime, original_name) VALUES (?,?,?,?,?)",
+                  (str(uuid.uuid4()), entry_id, fid, f.type or "", f.name))
     conn.commit(); conn.close(); upload_db(DB_PATH)
 
 def replace_tasks(entry_id: str, new_tasks: list[str]):
@@ -384,6 +433,36 @@ def backfill_make_public(user: str | None = None):
     conn.close()
     for fid in (img + aud + vid):
         make_public_read(fid)
+
+# Helper function to format file size
+def format_file_size(size_bytes):
+    """Convert bytes to human readable format"""
+    if size_bytes == 0:
+        return "0 B"
+    size_names = ["B", "KB", "MB", "GB"]
+    import math
+    i = int(math.floor(math.log(size_bytes, 1024)))
+    p = math.pow(1024, i)
+    s = round(size_bytes / p, 2)
+    return f"{s} {size_names[i]}"
+
+# Helper function to create download button for media files
+def create_download_button(file_id: str, original_name: str, media_type: str, key_suffix: str):
+    """Create a download button for media files"""
+    try:
+        data, _ = fetch_drive_bytes(file_id)
+        file_info = get_drive_file_info(file_id)
+        file_size = format_file_size(file_info.get("size", len(data)))
+        
+        st.download_button(
+            label=f"📥 Download ({file_size})",
+            data=data,
+            file_name=original_name,
+            mime=file_info.get("mime", "application/octet-stream"),
+            key=f"download_{media_type}_{key_suffix}"
+        )
+    except Exception as e:
+        st.error(f"Error creating download button: {str(e)}")
 
 # ---------------------------- Enhanced Monthly Reflection ----------------------------
 
@@ -582,7 +661,7 @@ def render_enhanced_monthly_summary_section():
         )
 
 # ---------------------------- UI ----------------------------
-st.set_page_config(page_title="Sanny’s Diary", page_icon="🌀", layout="centered")
+st.set_page_config(page_title="Sanny's Diary", page_icon="🌀", layout="centered")
 st.title("🌀 迷惘但想搞懂的我 / Lost but Learning")
 st.caption("SQLite in Google Drive • Proxy media • Images/Audio/Videos split • History=5 • Smart Search • LLM Monthly")
 
@@ -648,31 +727,51 @@ elif section == "Recent Entries":
             if e["meaningful"]:
                 st.markdown(f"**Meaningful:** {e['meaningful']}")
 
+            # Enhanced Images section with filenames and download
             if e.get("images"):
                 st.write("**Images:**")
-                for a in e["images"]:
-                    data, _ = fetch_drive_bytes(a["file_id"])
-                    st.image(data, use_container_width=True)
+                for i, img in enumerate(e["images"]):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        data, _ = fetch_drive_bytes(img["file_id"])
+                        st.image(data, use_container_width=True, caption=img["original_name"])
+                    with col2:
+                        st.write(f"**{img['original_name']}**")
+                        create_download_button(img["file_id"], img["original_name"], "image", f"{e['id']}_{i}")
 
+            # Enhanced Audio section with filenames and download
             if e.get("audio"):
                 st.write("**Audio:**")
-                for a in e["audio"]:
-                    data, mime = fetch_drive_bytes(a["file_id"])
-                    fmt = "audio/mpeg"
-                    mime = (mime or "").lower()
-                    if "mp4" in mime or "aac" in mime or "m4a" in mime: fmt = "audio/mp4"
-                    elif "wav" in mime: fmt = "audio/wav"
-                    elif "ogg" in mime: fmt = "audio/ogg"
-                    st.audio(data, format=fmt)
+                for i, aud in enumerate(e["audio"]):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        data, mime = fetch_drive_bytes(aud["file_id"])
+                        fmt = "audio/mpeg"
+                        mime = (mime or "").lower()
+                        if "mp4" in mime or "aac" in mime or "m4a" in mime: fmt = "audio/mp4"
+                        elif "wav" in mime: fmt = "audio/wav"
+                        elif "ogg" in mime: fmt = "audio/ogg"
+                        st.audio(data, format=fmt)
+                        st.caption(aud["original_name"])
+                    with col2:
+                        st.write(f"**{aud['original_name']}**")
+                        create_download_button(aud["file_id"], aud["original_name"], "audio", f"{e['id']}_{i}")
 
+            # Enhanced Videos section with filenames and download
             if e.get("videos"):
                 st.write("**Videos:**")
-                for a in e["videos"]:
-                    data, _ = fetch_drive_bytes(a["file_id"])
-                    st.video(data)
+                for i, vid in enumerate(e["videos"]):
+                    col1, col2 = st.columns([3, 1])
+                    with col1:
+                        data, _ = fetch_drive_bytes(vid["file_id"])
+                        st.video(data)
+                        st.caption(vid["original_name"])
+                    with col2:
+                        st.write(f"**{vid['original_name']}**")
+                        create_download_button(vid["file_id"], vid["original_name"], "video", f"{e['id']}_{i}")
 
             if e["tasks"]:
-                st.write("**Tomorrow’s Tasks:**")
+                st.write("**Tomorrow's Tasks:**")
                 for t in e["tasks"]:
                     new_val = st.checkbox(t["text"], value=t["is_done"], key=f"task-{t['id']}")
                     if new_val != t["is_done"]:
@@ -680,6 +779,8 @@ elif section == "Recent Entries":
 
             if st.button("🗑️ 刪除這筆 / Delete this entry", key=f"del-entry-{e['id']}"):
                 delete_entry(e["id"]); st.success("Entry deleted."); st.rerun()
+            
+            st.markdown("---")  # Add separator between entries
 
 elif section == "Edit Past Entry":
     st.subheader("✏️ 編輯過去日記 / Edit Past Entry")
@@ -709,43 +810,52 @@ elif section == "Edit Past Entry":
                     add_vids = st.file_uploader("新增影片 / Add videos", type=["mp4","webm","mov","mkv"], accept_multiple_files=True)
                     submitted_edit = st.form_submit_button("儲存變更 / Save changes")
 
+                # Enhanced existing media display with filenames and download
                 if entry.get("images"):
                     st.write("現有圖片 / Existing images:")
-                    for a in entry["images"]:
-                        col1, col2 = st.columns([4,1])
+                    for i, img in enumerate(entry["images"]):
+                        col1, col2, col3 = st.columns([3, 1, 1])
                         with col1:
-                            data, _ = fetch_drive_bytes(a["file_id"])
-                            st.image(data,use_container_width=True)
+                            data, _ = fetch_drive_bytes(img["file_id"])
+                            st.image(data, use_container_width=True, caption=img["original_name"])
                         with col2:
-                            if st.button("刪除 / Delete", key=f"del-img-{a['id']}"):
-                                delete_image(a["id"]); st.rerun()
+                            create_download_button(img["file_id"], img["original_name"], "image", f"edit_{sel_id}_{i}")
+                        with col3:
+                            if st.button("刪除 / Delete", key=f"del-img-{img['id']}"):
+                                delete_image(img["id"]); st.rerun()
 
                 if entry.get("audio"):
                     st.write("現有音訊 / Existing audio:")
-                    for a in entry["audio"]:
-                        col1, col2 = st.columns([4,1])
+                    for i, aud in enumerate(entry["audio"]):
+                        col1, col2, col3 = st.columns([3, 1, 1])
                         with col1:
-                            data, mime = fetch_drive_bytes(a["file_id"])
+                            data, mime = fetch_drive_bytes(aud["file_id"])
                             fmt = "audio/mpeg"
                             mime = (mime or "").lower()
                             if "mp4" in mime or "aac" in mime or "m4a" in mime: fmt = "audio/mp4"
                             elif "wav" in mime: fmt = "audio/wav"
                             elif "ogg" in mime: fmt = "audio/ogg"
                             st.audio(data, format=fmt)
+                            st.caption(aud["original_name"])
                         with col2:
-                            if st.button("刪除 / Delete", key=f"del-aud-{a['id']}"):
-                                delete_audio(a["id"]); st.rerun()
+                            create_download_button(aud["file_id"], aud["original_name"], "audio", f"edit_{sel_id}_{i}")
+                        with col3:
+                            if st.button("刪除 / Delete", key=f"del-aud-{aud['id']}"):
+                                delete_audio(aud["id"]); st.rerun()
 
                 if entry.get("videos"):
                     st.write("現有影片 / Existing videos:")
-                    for a in entry["videos"]:
-                        col1, col2 = st.columns([4,1])
+                    for i, vid in enumerate(entry["videos"]):
+                        col1, col2, col3 = st.columns([3, 1, 1])
                         with col1:
-                            data, _ = fetch_drive_bytes(a["file_id"])
+                            data, _ = fetch_drive_bytes(vid["file_id"])
                             st.video(data)
+                            st.caption(vid["original_name"])
                         with col2:
-                            if st.button("刪除 / Delete", key=f"del-vid-{a['id']}"):
-                                delete_video(a["id"]); st.rerun()
+                            create_download_button(vid["file_id"], vid["original_name"], "video", f"edit_{sel_id}_{i}")
+                        with col3:
+                            if st.button("刪除 / Delete", key=f"del-vid-{vid['id']}"):
+                                delete_video(vid["id"]); st.rerun()
 
                 if submitted_edit:
                     summary = summarize_text(new_what)
