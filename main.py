@@ -859,16 +859,19 @@ elif section == "Edit Past Entry":
 
 elif section == "Search Results":
     st.subheader("🔎 搜尋結果 / Search Results")
+    
+    # Search controls
     q = st.text_input("Keywords (space-separated)", key="q")
     tag_query = st.text_input("Filter tags (comma-separated)", key="tags_q")
     mood_min, mood_max = st.slider("Mood range", 1, 10, (1, 10), key="mood_q")
     c1, c2 = st.columns(2)
     date_from = c1.date_input("From", value=None, key="from_q")
-    date_to   = c2.date_input("To", value=None, key="to_q")
+    date_to = c2.date_input("To", value=None, key="to_q")
 
     conn = get_conn()
     df_all = pd.read_sql_query("SELECT * FROM entries WHERE user = ? ORDER BY date DESC, created_at DESC", conn, params=(user,))
     conn.close()
+    
     if df_all.empty:
         st.info("無資料可搜尋。")
     else:
@@ -904,13 +907,115 @@ elif section == "Search Results":
         d_to = date_to if isinstance(date_to, datetime.date) else None
         df_all["__score"] = df_all.apply(lambda r: score_row(r, q_tokens, tag_tokens, (mood_min, mood_max), d_from, d_to), axis=1)
         res = df_all[df_all["__score"] >= 0].sort_values(["__score","date"], ascending=[False, False]).head(50)
+        
         if res.empty:
             st.info("找不到符合的結果。")
         else:
+            st.write(f"Found {len(res)} matching entries:")
+            
+            # Load complete entry details for each search result
             for _, r in res.iterrows():
-                st.markdown(f"**{r['date']}** — Mood: {r['mood'] if pd.notnull(r['mood']) else '-'}")
-                st.write((r["what"] or "")[:280])
-                if r.get("tags"): st.caption(f"Tags: {r['tags']}")
+                entry_id = r["id"]
+                
+                # Load the complete entry with all media and tasks
+                entry = load_entry_detail(entry_id)
+                if not entry:
+                    continue
+                    
+                # Display complete entry (similar to Recent Entries section)
+                st.markdown(f"**🗓️ {entry['date']}** — **Mood:** {entry['mood'] if entry['mood'] is not None else '-'} /10")
+                
+                # Show search score if there are search terms
+                if q_tokens or tag_tokens:
+                    st.caption(f"Search relevance score: {r['__score']}")
+                
+                st.markdown(f"**What:** {entry['what'] or ''}")
+                if entry["meaningful"]:
+                    st.markdown(f"**Meaningful:** {entry['meaningful']}")
+                if entry["choice"]:
+                    st.markdown(f"**Choice:** {entry['choice']}")
+                if entry["no_repeat"]:
+                    st.markdown(f"**Won't repeat:** {entry['no_repeat']}")
+                if entry["plans"]:
+                    st.markdown(f"**Plans:** {entry['plans']}")
+                if entry["tags"]:
+                    st.markdown(f"**Tags:** {entry['tags']}")
+
+                # Images
+                if entry.get("images"):
+                    st.write("**Images:**")
+                    for i, img in enumerate(entry["images"]):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            try:
+                                data, _ = fetch_drive_bytes(img["file_id"])
+                                st.image(data, use_container_width=True, caption=img["original_name"])
+                            except Exception as e:
+                                st.error(f"Error loading image: {str(e)}")
+                        with col2:
+                            st.write(f"**{img['original_name']}**")
+                            create_download_button(img["file_id"], img["original_name"], "image", f"search_{entry_id}_{i}")
+
+                # Audio
+                if entry.get("audio"):
+                    st.write("**Audio:**")
+                    for i, aud in enumerate(entry["audio"]):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            try:
+                                data, mime = fetch_drive_bytes(aud["file_id"])
+                                fmt = "audio/mpeg"
+                                mime = (mime or "").lower()
+                                if "mp4" in mime or "aac" in mime or "m4a" in mime: 
+                                    fmt = "audio/mp4"
+                                elif "wav" in mime: 
+                                    fmt = "audio/wav"
+                                elif "ogg" in mime: 
+                                    fmt = "audio/ogg"
+                                st.audio(data, format=fmt)
+                                st.caption(aud["original_name"])
+                            except Exception as e:
+                                st.error(f"Error loading audio: {str(e)}")
+                        with col2:
+                            st.write(f"**{aud['original_name']}**")
+                            create_download_button(aud["file_id"], aud["original_name"], "audio", f"search_{entry_id}_{i}")
+
+                # Videos
+                if entry.get("videos"):
+                    st.write("**Videos:**")
+                    for i, vid in enumerate(entry["videos"]):
+                        col1, col2 = st.columns([3, 1])
+                        with col1:
+                            try:
+                                data, _ = fetch_drive_bytes(vid["file_id"])
+                                st.video(data)
+                                st.caption(vid["original_name"])
+                            except Exception as e:
+                                st.error(f"Error loading video: {str(e)}")
+                        with col2:
+                            st.write(f"**{vid['original_name']}**")
+                            create_download_button(vid["file_id"], vid["original_name"], "video", f"search_{entry_id}_{i}")
+
+                # Tasks with interactive checkboxes
+                if entry["tasks"]:
+                    st.write("**Tasks:**")
+                    for t in entry["tasks"]:
+                        # Use unique key for search results to avoid conflicts with Recent Entries
+                        new_val = st.checkbox(
+                            t["text"], 
+                            value=t["is_done"], 
+                            key=f"search-task-{t['id']}-{entry_id}"
+                        )
+                        if new_val != t["is_done"]:
+                            update_task_done(t["id"], new_val)
+                            st.rerun()
+
+                # Delete button for each entry
+                if st.button("🗑️ 刪除這筆 / Delete this entry", key=f"del-search-entry-{entry_id}"):
+                    delete_entry(entry_id)
+                    st.success("Entry deleted.")
+                    st.rerun()
+                
                 st.markdown("---")
 
 elif section == "Monthly Summary":
