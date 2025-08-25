@@ -752,15 +752,13 @@ elif section == "Recent Entries":
                         st.write(f"**{vid['original_name']}**")
                         create_download_button(vid["file_id"], vid["original_name"], "video", f"{e['id']}_{i}")
 
+            # Tasks - read-only in Recent Entries (no edit/delete functionality)
             if e["tasks"]:
                 st.write("**Tomorrow's Tasks:**")
                 for t in e["tasks"]:
-                    new_val = st.checkbox(t["text"], value=t["is_done"], key=f"task-{t['id']}")
-                    if new_val != t["is_done"]:
-                        update_task_done(t["id"], new_val)
+                    status_icon = "✅" if t["is_done"] else "⬜"
+                    st.write(f"{status_icon} {t['text']}")
 
-            if st.button("🗑️ 刪除這筆 / Delete this entry", key=f"del-entry-{e['id']}"):
-                delete_entry(e["id"]); st.success("Entry deleted."); st.rerun()
             st.markdown("---")
 
 elif section == "Edit Past Entry":
@@ -776,6 +774,14 @@ elif section == "Edit Past Entry":
             sel_id = opts.loc[opts["label"] == chosen, "id"].iloc[0]
             entry = load_entry_detail(sel_id)
             if entry:
+                # Entry deletion section
+                with st.expander("🗑️ 危險區域 / Danger Zone"):
+                    st.warning("⚠️ 刪除後無法恢復 / This action cannot be undone")
+                    if st.button("🗑️ 刪除這筆日記 / Delete this entry", type="secondary"):
+                        delete_entry(sel_id)
+                        st.success("Entry deleted.")
+                        st.rerun()
+
                 with st.form("edit_entry_form", clear_on_submit=False):
                     new_date = st.text_input("日期 / Date (YYYY-MM-DD)", entry["date"])
                     new_what = st.text_area("What did you do today?", entry["what"] or "", height=140)
@@ -791,8 +797,9 @@ elif section == "Edit Past Entry":
                     add_vids = st.file_uploader("新增影片 / Add videos", type=["mp4","webm","mov","mkv"], accept_multiple_files=True)
                     submitted_edit = st.form_submit_button("儲存變更 / Save changes")
 
+                # Existing media with edit/delete functionality
                 if entry.get("images"):
-                    st.write("現有圖片 / Existing images:")
+                    st.write("**現有圖片 / Existing images:**")
                     for i, img in enumerate(entry["images"]):
                         col1, col2, col3 = st.columns([3, 1, 1])
                         with col1:
@@ -801,11 +808,11 @@ elif section == "Edit Past Entry":
                         with col2:
                             create_download_button(img["file_id"], img["original_name"], "image", f"edit_{sel_id}_{i}")
                         with col3:
-                            if st.button("刪除 / Delete", key=f"del-img-{img['id']}"):
+                            if st.button("🗑️ 刪除 / Delete", key=f"del-img-{img['id']}"):
                                 delete_media(img["id"], "images"); st.rerun()
 
                 if entry.get("audio"):
-                    st.write("現有音訊 / Existing audio:")
+                    st.write("**現有音訊 / Existing audio:**")
                     for i, aud in enumerate(entry["audio"]):
                         col1, col2, col3 = st.columns([3, 1, 1])
                         with col1:
@@ -820,11 +827,11 @@ elif section == "Edit Past Entry":
                         with col2:
                             create_download_button(aud["file_id"], aud["original_name"], "audio", f"edit_{sel_id}_{i}")
                         with col3:
-                            if st.button("刪除 / Delete", key=f"del-aud-{aud['id']}"):
+                            if st.button("🗑️ 刪除 / Delete", key=f"del-aud-{aud['id']}"):
                                 delete_media(aud["id"], "audio"); st.rerun()
 
                 if entry.get("videos"):
-                    st.write("現有影片 / Existing videos:")
+                    st.write("**現有影片 / Existing videos:**")
                     for i, vid in enumerate(entry["videos"]):
                         col1, col2, col3 = st.columns([3, 1, 1])
                         with col1:
@@ -834,8 +841,21 @@ elif section == "Edit Past Entry":
                         with col2:
                             create_download_button(vid["file_id"], vid["original_name"], "video", f"edit_{sel_id}_{i}")
                         with col3:
-                            if st.button("刪除 / Delete", key=f"del-vid-{vid['id']}"):
+                            if st.button("🗑️ 刪除 / Delete", key=f"del-vid-{vid['id']}"):
                                 delete_media(vid["id"], "videos"); st.rerun()
+
+                # Task management section
+                if entry["tasks"]:
+                    st.write("**現有任務 / Existing Tasks:**")
+                    for t in entry["tasks"]:
+                        col1, col2 = st.columns([4, 1])
+                        with col1:
+                            new_val = st.checkbox(t["text"], value=t["is_done"], key=f"edit-task-{t['id']}")
+                            if new_val != t["is_done"]:
+                                update_task_done(t["id"], new_val)
+                        with col2:
+                            # Tasks are managed through the plans text area above, no individual delete needed
+                            pass
 
                 if submitted_edit:
                     summary = summarize_text(new_what)
@@ -922,7 +942,7 @@ elif section == "Search Results":
                 if not entry:
                     continue
                     
-                # Display complete entry (similar to Recent Entries section)
+                # Display complete entry (similar to Recent Entries section but read-only)
                 st.markdown(f"**🗓️ {entry['date']}** — **Mood:** {entry['mood'] if entry['mood'] is not None else '-'} /10")
                 
                 # Show search score if there are search terms
@@ -941,7 +961,7 @@ elif section == "Search Results":
                 if entry["tags"]:
                     st.markdown(f"**Tags:** {entry['tags']}")
 
-                # Images
+                # Images (read-only)
                 if entry.get("images"):
                     st.write("**Images:**")
                     for i, img in enumerate(entry["images"]):
@@ -956,7 +976,7 @@ elif section == "Search Results":
                             st.write(f"**{img['original_name']}**")
                             create_download_button(img["file_id"], img["original_name"], "image", f"search_{entry_id}_{i}")
 
-                # Audio
+                # Audio (read-only)
                 if entry.get("audio"):
                     st.write("**Audio:**")
                     for i, aud in enumerate(entry["audio"]):
@@ -980,7 +1000,7 @@ elif section == "Search Results":
                             st.write(f"**{aud['original_name']}**")
                             create_download_button(aud["file_id"], aud["original_name"], "audio", f"search_{entry_id}_{i}")
 
-                # Videos
+                # Videos (read-only)
                 if entry.get("videos"):
                     st.write("**Videos:**")
                     for i, vid in enumerate(entry["videos"]):
@@ -996,25 +1016,12 @@ elif section == "Search Results":
                             st.write(f"**{vid['original_name']}**")
                             create_download_button(vid["file_id"], vid["original_name"], "video", f"search_{entry_id}_{i}")
 
-                # Tasks with interactive checkboxes
+                # Tasks (read-only display)
                 if entry["tasks"]:
                     st.write("**Tasks:**")
                     for t in entry["tasks"]:
-                        # Use unique key for search results to avoid conflicts with Recent Entries
-                        new_val = st.checkbox(
-                            t["text"], 
-                            value=t["is_done"], 
-                            key=f"search-task-{t['id']}-{entry_id}"
-                        )
-                        if new_val != t["is_done"]:
-                            update_task_done(t["id"], new_val)
-                            st.rerun()
-
-                # Delete button for each entry
-                if st.button("🗑️ 刪除這筆 / Delete this entry", key=f"del-search-entry-{entry_id}"):
-                    delete_entry(entry_id)
-                    st.success("Entry deleted.")
-                    st.rerun()
+                        status_icon = "✅" if t["is_done"] else "⬜"
+                        st.write(f"{status_icon} {t['text']}")
                 
                 st.markdown("---")
 
