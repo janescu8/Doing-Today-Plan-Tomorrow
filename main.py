@@ -497,6 +497,16 @@ def create_download_button(file_id: str, original_name: str, media_type: str, ke
     except Exception as e:
         st.error(f"Error creating download button: {str(e)}")
 
+def render_bullet_block(title: str, text: str | None):
+    """將多行文字以 bullet points 顯示"""
+    if not text:
+        return
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    if not lines:
+        return
+    st.markdown(f"**{title}**")
+    st.markdown("\n".join(f"- {ln}" for ln in lines))
+
 def backfill_make_public(user: str | None = None):
     conn = get_conn(); cur = conn.cursor()
     if user:
@@ -548,7 +558,7 @@ def llm_monthly_summary(user: str, year: int, month: int) -> str:
     """
     Generate a monthly reflection from diary entries using OpenAI GPT or fallback.
     Returns a cohesive paragraph with patterns, wins, struggles, and 3 actionable suggestions.
-    Uses all major fields (what, meaningful, mood score & note, choice, no_repeat, plans_today, plans, tags).
+    Uses all major fields (what, meaningful, mood score & note, story, choice, no_repeat, plans_today, plans, tags).
     """
     conn = get_conn()
     start = datetime.date(year, month, 1)
@@ -602,7 +612,7 @@ def llm_monthly_summary(user: str, year: int, month: int) -> str:
             prompt = (
                 "You are a helpful, concise coach.\n"
                 "From the following daily diary entries (each line includes date, What you did, Meaningful moments, "
-                "Mood score and note, Choice/autonomy, things you won't repeat, plans for today and tomorrow, and tags), "
+                "Mood score and note, Story, Choice/autonomy, things you won't repeat, plans for today and tomorrow, and tags), "
                 "produce a SINGLE cohesive paragraph that serves as a monthly reflection.\n"
                 "Do NOT list or repeat individual daily logs. Instead, synthesize them into:\n"
                 "- Patterns and recurring themes across the month\n"
@@ -792,10 +802,12 @@ elif section == "Recent Entries":
                 st.markdown(f"**Story:** {e['story']}")
             if e["meaningful"]:
                 st.markdown(f"**Meaningful:** {e['meaningful']}")
+
+            # bullet plans
             if e.get("plans_today"):
-                st.markdown(f"**Plans today:** {e['plans_today']}")
+                render_bullet_block("Plans today:", e["plans_today"])
             if e.get("plans"):
-                st.markdown(f"**Plans tomorrow:** {e['plans']}")
+                render_bullet_block("Plans tomorrow:", e["plans"])
 
             # Images
             if e.get("images"):
@@ -1064,10 +1076,13 @@ elif section == "Search Results":
                     st.markdown(f"**Choice:** {entry['choice']}")
                 if entry["no_repeat"]:
                     st.markdown(f"**Won't repeat:** {entry['no_repeat']}")
+
+                # bullet plans
                 if entry.get("plans_today"):
-                    st.markdown(f"**Plans today:** {entry['plans_today']}")
-                if entry["plans"]:
-                    st.markdown(f"**Plans:** {entry["plans"]}")
+                    render_bullet_block("Plans today:", entry["plans_today"])
+                if entry.get("plans"):
+                    render_bullet_block("Plans tomorrow:", entry["plans"])
+
                 if entry["tags"]:
                     st.markdown(f"**Tags:** {entry["tags"]}")
 
