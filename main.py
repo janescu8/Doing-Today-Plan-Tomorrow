@@ -185,14 +185,18 @@ CREATE TABLE IF NOT EXISTS entries (
   no_repeat TEXT,
   plans_today TEXT,
   plans TEXT,
-  tags TEXT,
-  summary TEXT,
 
-  -- NEW: gratitude (Option C)
+  -- NEW: gratitude (person/thing/self)
   grat_person TEXT,
   grat_thing TEXT,
   grat_self TEXT,
 
+  -- NEW: short/long plans
+  small_plan TEXT,
+  big_plan TEXT,
+
+  tags TEXT,
+  summary TEXT,
   created_at TEXT DEFAULT CURRENT_TIMESTAMP
 );
 
@@ -254,20 +258,19 @@ def ensure_db():
         # Ensure new entry columns exist
         cursor.execute("PRAGMA table_info(entries)")
         cols = [c[1] for c in cursor.fetchall()]
-        if "mood_note" not in cols:
-            cursor.execute("ALTER TABLE entries ADD COLUMN mood_note TEXT")
-        if "story" not in cols:
-            cursor.execute("ALTER TABLE entries ADD COLUMN story TEXT")
-        if "plans_today" not in cols:
-            cursor.execute("ALTER TABLE entries ADD COLUMN plans_today TEXT")
 
-        # NEW gratitude columns migration
-        if "grat_person" not in cols:
-            cursor.execute("ALTER TABLE entries ADD COLUMN grat_person TEXT")
-        if "grat_thing" not in cols:
-            cursor.execute("ALTER TABLE entries ADD COLUMN grat_thing TEXT")
-        if "grat_self" not in cols:
-            cursor.execute("ALTER TABLE entries ADD COLUMN grat_self TEXT")
+        for col, ddl in [
+            ("mood_note", "ALTER TABLE entries ADD COLUMN mood_note TEXT"),
+            ("story", "ALTER TABLE entries ADD COLUMN story TEXT"),
+            ("plans_today", "ALTER TABLE entries ADD COLUMN plans_today TEXT"),
+            ("grat_person", "ALTER TABLE entries ADD COLUMN grat_person TEXT"),
+            ("grat_thing", "ALTER TABLE entries ADD COLUMN grat_thing TEXT"),
+            ("grat_self", "ALTER TABLE entries ADD COLUMN grat_self TEXT"),
+            ("small_plan", "ALTER TABLE entries ADD COLUMN small_plan TEXT"),
+            ("big_plan", "ALTER TABLE entries ADD COLUMN big_plan TEXT"),
+        ]:
+            if col not in cols:
+                cursor.execute(ddl)
 
         conn.commit()
         conn.close()
@@ -357,6 +360,42 @@ def list_media(entry_id: str, kind: str):
         })
     return out
 
+# ---------- Render helpers ----------
+def render_bullet_block(title: str, text: str | None):
+    """將多行文字以 bullet points 顯示"""
+    if not text:
+        return
+    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
+    if not lines:
+        return
+    st.markdown(f"**{title}**")
+    st.markdown("\n".join(f"- {ln}" for ln in lines))
+
+def render_gratitude_section(e: dict):
+    p = (e.get("grat_person") or "").strip()
+    t = (e.get("grat_thing") or "").strip()
+    s = (e.get("grat_self") or "").strip()
+    if not (p or t or s):
+        return
+    st.markdown("**🙏 感恩日記 / Gratitude**")
+    if p:
+        st.markdown(f"- **Grateful for someone：** {p}")
+    if t:
+        st.markdown(f"- **Grateful for something：** {t}")
+    if s:
+        st.markdown(f"- **Grateful for myself：** {s}")
+
+def render_plan_horizon_section(e: dict):
+    sp = (e.get("small_plan") or "").strip()
+    bp = (e.get("big_plan") or "").strip()
+    if not (sp or bp):
+        return
+    st.markdown("**🧭 最近計劃 / Plans**")
+    if sp:
+        st.markdown(f"- **最近有什麼小計劃？（7–14 天）：** {sp}")
+    if bp:
+        st.markdown(f"- **最近有什麼大計劃？（1–6 個月）：** {bp}")
+
 # ---------- Entries CRUD ----------
 def save_entry_to_db(
     user,
@@ -366,6 +405,11 @@ def save_entry_to_db(
     mood,
     mood_note,
     story,
+    grat_person,
+    grat_thing,
+    grat_self,
+    small_plan,
+    big_plan,
     choice,
     no_repeat,
     plans_today,
@@ -374,10 +418,6 @@ def save_entry_to_db(
     uploaded_images,
     uploaded_audio,
     uploaded_videos,
-    # NEW gratitude
-    grat_person,
-    grat_thing,
-    grat_self,
 ):
     entry_id = str(uuid.uuid4())
     tags_str = ", ".join([t.strip() for t in (tags or "").split(",") if t.strip()])
@@ -386,9 +426,11 @@ def save_entry_to_db(
     conn = get_conn(); c = conn.cursor()
     c.execute(
         """INSERT INTO entries
-           (id,user,date,what,meaningful,mood,mood_note,story,choice,no_repeat,plans_today,plans,tags,summary,
-            grat_person, grat_thing, grat_self)
-           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
+           (id,user,date,what,meaningful,mood,mood_note,story,
+            grat_person,grat_thing,grat_self,
+            small_plan,big_plan,
+            choice,no_repeat,plans_today,plans,tags,summary)
+           VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)""",
         (
             entry_id,
             user,
@@ -398,20 +440,21 @@ def save_entry_to_db(
             int(mood) if mood else None,
             mood_note,
             story,
+            grat_person,
+            grat_thing,
+            grat_self,
+            small_plan,
+            big_plan,
             choice,
             no_repeat,
             plans_today,
             plans_tomorrow,
             tags_str,
             summary,
-            grat_person,
-            grat_thing,
-            grat_self,
         ),
     )
     conn.commit(); conn.close()
 
-    # add media (generic)
     add_media(entry_id, uploaded_images, user, "images")
     add_media(entry_id, uploaded_audio,  user, "audio")
     add_media(entry_id, uploaded_videos, user, "videos")
@@ -430,9 +473,10 @@ def list_entries_for_user(user, limit=100):
 def load_entry_bundle(user, limit=5):
     conn = get_conn(); c = conn.cursor()
     c.execute(
-        """SELECT id,user,date,what,meaningful,mood,mood_note,story,choice,no_repeat,plans_today,plans,tags,summary,
-                  grat_person, grat_thing, grat_self,
-                  created_at
+        """SELECT id,user,date,what,meaningful,mood,mood_note,story,
+                  grat_person,grat_thing,grat_self,
+                  small_plan,big_plan,
+                  choice,no_repeat,plans_today,plans,tags,summary,created_at
            FROM entries WHERE user=? ORDER BY date DESC, created_at DESC LIMIT ?""",
         (user, limit),
     )
@@ -446,7 +490,6 @@ def load_entry_bundle(user, limit=5):
         e["audio"]  = list_media(eid, "audio")
         e["videos"] = list_media(eid, "videos")
 
-        # tasks
         conn2 = get_conn(); cur2 = conn2.cursor()
         cur2.execute("SELECT id, text, is_done FROM tasks WHERE entry_id=?", (eid,))
         e["tasks"] = [{"id": tid, "text": t, "is_done": bool(done)} for (tid, t, done) in cur2.fetchall()]
@@ -456,8 +499,10 @@ def load_entry_bundle(user, limit=5):
 def load_entry_detail(entry_id: str):
     conn = get_conn(); c = conn.cursor()
     c.execute(
-        """SELECT id,user,date,what,meaningful,mood,mood_note,story,choice,no_repeat,plans_today,plans,tags,summary,
-                  grat_person, grat_thing, grat_self
+        """SELECT id,user,date,what,meaningful,mood,mood_note,story,
+                  grat_person,grat_thing,grat_self,
+                  small_plan,big_plan,
+                  choice,no_repeat,plans_today,plans,tags,summary
            FROM entries WHERE id=?""",
         (entry_id,),
     )
@@ -493,126 +538,18 @@ def delete_entry(entry_id: str):
     conn.commit(); conn.close()
     upload_db(DB_PATH)
 
-# ---------- Utilities ----------
-def rfc3339_to_epoch_safe(s):
-    try:
-        return rfc3339_to_epoch(s)
-    except Exception:
-        return None
-
-def format_file_size(size_bytes):
-    """Convert bytes to human readable format"""
-    if size_bytes == 0:
-        return "0 B"
-    size_names = ["B", "KB", "MB", "GB"]
-    import math
-    i = int(math.floor(math.log(size_bytes, 1024)))
-    p = math.pow(1024, i)
-    s = round(size_bytes / p, 2)
-    return f"{s} {size_names[i]}"
-
-def create_download_button(file_id: str, original_name: str, media_type: str, key_suffix: str):
-    """Create a download button for media files"""
-    try:
-        data, _ = fetch_drive_bytes(file_id)
-        file_info = get_drive_file_info(file_id)
-        file_size = format_file_size(file_info.get("size", len(data)))
-        st.download_button(
-            label=f"📥 Download ({file_size})",
-            data=data,
-            file_name=original_name,
-            mime=file_info.get("mime", "application/octet-stream"),
-            key=f"download_{media_type}_{key_suffix}"
-        )
-    except Exception as e:
-        st.error(f"Error creating download button: {str(e)}")
-
-def render_bullet_block(title: str, text: str | None):
-    """將多行文字以 bullet points 顯示"""
-    if not text:
-        return
-    lines = [ln.strip() for ln in str(text).splitlines() if ln.strip()]
-    if not lines:
-        return
-    st.markdown(f"**{title}**")
-    st.markdown("\n".join(f"- {ln}" for ln in lines))
-
-def render_gratitude_section(e: dict, compact: bool = False):
-    """Option C gratitude renderer (person/thing/self)"""
-    p = (e.get("grat_person") or "").strip()
-    t = (e.get("grat_thing") or "").strip()
-    s = (e.get("grat_self") or "").strip()
-    if not (p or t or s):
-        return
-    st.markdown("**🙏 感恩 / Gratitude**")
-    if p:
-        st.markdown(f"- **Grateful for someone:** {p}")
-    if t:
-        st.markdown(f"- **Grateful for something:** {t}")
-    if s:
-        st.markdown(f"- **Grateful for myself:** {s}")
-
-def backfill_make_public(user: str | None = None):
-    conn = get_conn(); cur = conn.cursor()
-    if user:
-        cur.execute("""SELECT i.drive_file_id FROM images i JOIN entries e ON e.id=i.entry_id WHERE e.user=?""", (user,))
-        img = [r[0] for r in cur.fetchall()]
-        cur.execute("""SELECT a.drive_file_id FROM audio a JOIN entries e ON e.id=a.entry_id WHERE e.user=?""", (user,))
-        aud = [r[0] for r in cur.fetchall()]
-        cur.execute("""SELECT v.drive_file_id FROM videos v JOIN entries e ON e.id=v.entry_id WHERE e.user=?""", (user,))
-        vid = [r[0] for r in cur.fetchall()]
-    else:
-        cur.execute("SELECT drive_file_id FROM images"); img = [r[0] for r in cur.fetchall()]
-        cur.execute("SELECT drive_file_id FROM audio");  aud = [r[0] for r in cur.fetchall()]
-        cur.execute("SELECT drive_file_id FROM videos"); vid = [r[0] for r in cur.fetchall()]
-    conn.close()
-    for fid in (img + aud + vid):
-        make_public_read(fid)
-
-def backfill_original_names(user: str | None = None):
-    """
-    Populate original_name in images/audio/videos where it's NULL or empty,
-    using Drive metadata (with upload prefix stripped).
-    """
-    conn = get_conn(); cur = conn.cursor()
-    tables = ["images", "audio", "videos"]
-    for tbl in tables:
-        if user:
-            cur.execute(f"""
-                SELECT {tbl}.id, {tbl}.drive_file_id
-                FROM {tbl} JOIN entries e ON e.id = {tbl}.entry_id
-                WHERE ( {tbl}.original_name IS NULL OR TRIM({tbl}.original_name)='' )
-                  AND e.user = ?
-            """, (user,))
-        else:
-            cur.execute(f"""
-                SELECT id, drive_file_id FROM {tbl}
-                WHERE ( original_name IS NULL OR TRIM(original_name)='' )
-            """)
-        rows = cur.fetchall()
-        for row_id, fid in rows:
-            info = get_drive_file_info(fid)
-            name = strip_upload_prefix(info.get("name", "")) if info else ""
-            if not name:
-                name = "file" if tbl == "images" else ("audio" if tbl == "audio" else "video")
-            conn.execute(f"UPDATE {tbl} SET original_name=? WHERE id=?", (name, row_id))
-    conn.commit(); conn.close(); upload_db(DB_PATH)
-
 # ---------------------------- Enhanced Monthly Reflection ----------------------------
 def llm_monthly_summary(user: str, year: int, month: int) -> str:
-    """
-    Generate a monthly reflection from diary entries using OpenAI GPT or fallback.
-    Returns a cohesive paragraph with patterns, wins, struggles, and 3 actionable suggestions.
-    Uses all major fields including gratitude (person/thing/self).
-    """
     conn = get_conn()
     start = datetime.date(year, month, 1)
     end = (datetime.date(year+1,1,1)-datetime.timedelta(days=1)) if month==12 else (datetime.date(year,month+1,1)-datetime.timedelta(days=1))
 
     df = pd.read_sql_query(
         """
-        SELECT date, what, meaningful, mood, mood_note, story, choice, no_repeat, plans_today, plans, tags,
-               grat_person, grat_thing, grat_self
+        SELECT date, what, meaningful, mood, mood_note, story,
+               grat_person, grat_thing, grat_self,
+               small_plan, big_plan,
+               choice, no_repeat, plans_today, plans, tags
         FROM entries
         WHERE user = ? AND date BETWEEN ? AND ?
         ORDER BY date ASC
@@ -633,32 +570,34 @@ def llm_monthly_summary(user: str, year: int, month: int) -> str:
             entry_parts.append(f"Meaningful: {str(r['meaningful'])}")
         if pd.notna(r.get("mood")):
             entry_parts.append(f"Mood score: {str(int(r['mood']))}")
-        if "mood_note" in r and pd.notna(r["mood_note"]) and str(r["mood_note"]).strip():
+        if pd.notna(r.get("mood_note")) and str(r["mood_note"]).strip():
             entry_parts.append(f"Mood note: {str(r['mood_note'])}")
-        if "story" in r and pd.notna(r["story"]) and str(r["story"]).strip():
+        if pd.notna(r.get("story")) and str(r["story"]).strip():
             entry_parts.append(f"Story: {str(r['story'])}")
 
-        # gratitude (NEW)
         gp = str(r.get("grat_person") or "").strip()
         gt = str(r.get("grat_thing") or "").strip()
         gs = str(r.get("grat_self") or "").strip()
-        if gp:
-            entry_parts.append(f"Grateful for someone: {gp}")
-        if gt:
-            entry_parts.append(f"Grateful for something: {gt}")
-        if gs:
-            entry_parts.append(f"Grateful for myself: {gs}")
+        if gp: entry_parts.append(f"Grateful for someone: {gp}")
+        if gt: entry_parts.append(f"Grateful for something: {gt}")
+        if gs: entry_parts.append(f"Grateful for myself: {gs}")
+
+        sp = str(r.get("small_plan") or "").strip()
+        bp = str(r.get("big_plan") or "").strip()
+        if sp: entry_parts.append(f"Small plan (7-14d): {sp}")
+        if bp: entry_parts.append(f"Big plan (1-6mo): {bp}")
 
         if pd.notna(r.get("choice")) and str(r["choice"]).strip():
             entry_parts.append(f"Choice: {str(r['choice'])}")
         if pd.notna(r.get("no_repeat")) and str(r["no_repeat"]).strip():
             entry_parts.append(f"Won't repeat: {str(r['no_repeat'])}")
-        if "plans_today" in r and pd.notna(r["plans_today"]) and str(r["plans_today"]).strip():
+        if pd.notna(r.get("plans_today")) and str(r["plans_today"]).strip():
             entry_parts.append(f"Plans today: {str(r['plans_today'])}")
         if pd.notna(r.get("plans")) and str(r["plans"]).strip():
             entry_parts.append(f"Plans tomorrow: {str(r['plans'])}")
         if pd.notna(r.get("tags")) and str(r["tags"]).strip():
             entry_parts.append(f"Tags: {str(r['tags'])}")
+
         if entry_parts:
             lines.append(f"{r['date']}: " + " | ".join(entry_parts))
         else:
@@ -671,15 +610,15 @@ def llm_monthly_summary(user: str, year: int, month: int) -> str:
             prompt = (
                 "You are a helpful, concise coach.\n"
                 "From the following daily diary entries (each line includes date, What you did, Meaningful moments, "
-                "Mood score and note, Story, Gratitude (person/thing/self), Choice/autonomy, things you won't repeat, "
-                "plans for today and tomorrow, and tags), produce a SINGLE cohesive paragraph that serves as a monthly reflection.\n"
+                "Mood score and note, Story, Gratitude (someone/something/myself), small/big plans, Choice/autonomy, "
+                "things you won't repeat, plans for today and tomorrow, and tags), produce a SINGLE cohesive paragraph "
+                "that serves as a monthly reflection.\n"
                 "Do NOT list or repeat individual daily logs. Instead, synthesize them into:\n"
                 "- Patterns and recurring themes across the month\n"
                 "- Key wins and achievements\n"
                 "- Main struggles or challenges\n"
                 "- Exactly three actionable suggestions for improvement next month\n\n"
-                "The output must be written as smooth prose (not bullet points, not a log), "
-                "and must stay under 200 words.\n\n"
+                "The output must be written as smooth prose (not bullet points, not a log), and must stay under 200 words.\n\n"
                 "Entries:\n"
                 f"{digest}"
             )
@@ -701,53 +640,61 @@ def generate_fallback_reflection_from_entries(df) -> str:
     total_entries = len(df)
     mood_scores = df['mood'].dropna() if 'mood' in df.columns else pd.Series(dtype=float)
     avg_mood = mood_scores.mean() if not mood_scores.empty else None
-    all_tags = []
-    if 'tags' in df.columns:
-        for tags in df['tags'].dropna():
-            all_tags.extend([tag.strip().lower() for tag in str(tags).split(',') if tag.strip()])
-    common_tags = pd.Series(all_tags).value_counts().head(3).index.tolist() if all_tags else []
-    meaningful_count = df['meaningful'].notna().sum() if 'meaningful' in df.columns else 0
-    struggles_mentioned = df['no_repeat'].notna().sum() if 'no_repeat' in df.columns else 0
 
-    # gratitude coverage
     gp = df.get("grat_person", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
     gt = df.get("grat_thing", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
     gs = df.get("grat_self", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
     grat_days = int(((gp != "") | (gt != "") | (gs != "")).sum()) if len(df) else 0
 
+    sp = df.get("small_plan", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+    bp = df.get("big_plan", pd.Series(dtype=str)).fillna("").astype(str).str.strip()
+    sp_days = int((sp != "").sum()) if len(df) else 0
+    bp_days = int((bp != "").sum()) if len(df) else 0
+
+    all_tags = []
+    if 'tags' in df.columns:
+        for tags in df['tags'].dropna():
+            all_tags.extend([tag.strip().lower() for tag in str(tags).split(',') if tag.strip()])
+    common_tags = pd.Series(all_tags).value_counts().head(3).index.tolist() if all_tags else []
+
+    meaningful_count = df['meaningful'].notna().sum() if 'meaningful' in df.columns else 0
+    struggles_mentioned = df['no_repeat'].notna().sum() if 'no_repeat' in df.columns else 0
+
     reflection_parts = []
     if avg_mood is not None:
         mood_desc = "positive" if avg_mood >= 7 else "mixed" if avg_mood >= 5 else "challenging"
         reflection_parts.append(
-            f"Over the past month, you maintained consistent journaling with {total_entries} entries, showing a generally {mood_desc} emotional trend"
+            f"Over the past month, you wrote {total_entries} entries with a generally {mood_desc} emotional trend"
         )
     else:
-        reflection_parts.append(f"Over the past month, you maintained consistent journaling with {total_entries} entries")
+        reflection_parts.append(f"Over the past month, you wrote {total_entries} entries")
 
     wins = []
-    if grat_days > 0:
+    if grat_days:
         wins.append(f"practicing gratitude on {grat_days} day(s)")
     if meaningful_count > total_entries * 0.5:
         wins.append("finding meaning in daily experiences")
+    if sp_days or bp_days:
+        wins.append(f"staying connected to plans (small: {sp_days} day(s), big: {bp_days} day(s))")
     if common_tags:
-        wins.append(f"focusing on key themes like {', '.join(common_tags[:2])}")
+        wins.append(f"focusing on themes like {', '.join(common_tags[:2])}")
     if not wins:
         wins.append("maintaining consistent self-reflection")
     reflection_parts.append(f". Key wins include {' and '.join(wins)}")
 
     if struggles_mentioned > 0:
         reflection_parts.append(
-            f". You identified {struggles_mentioned} areas for improvement, showing good self-awareness about challenging patterns"
+            f". You noted {struggles_mentioned} areas you wouldn't repeat, showing good self-awareness about patterns to change"
         )
 
     suggestions = [
-        "keep the three-part gratitude (person/thing/self) but aim for one sentence each to stay consistent",
-        "look for repeat gratitude themes (e.g., relationships, health, autonomy) and turn one into a small weekly habit",
-        "when noting struggles, add one tiny next step so the entry becomes a bridge to action"
+        "keep the three-part gratitude (someone/something/myself) and aim for one sentence each to stay consistent",
+        "turn your small plan (7–14 days) into 2–3 concrete steps you can schedule",
+        "pick one big plan (1–6 months) theme and review it weekly to keep direction without pressure",
     ]
     reflection_parts.append(
-        f". To enhance next month, consider three steps: (1) {suggestions[0]}; (2) {suggestions[1]}; and (3) {suggestions[2]}. "
-        "These approaches should help you build on your reflective practice and create more intentional growth."
+        f". Next month, try: (1) {suggestions[0]}; (2) {suggestions[1]}; and (3) {suggestions[2]}. "
+        "These should help you build intentional momentum while staying kind to yourself."
     )
     return "".join(reflection_parts)
 
@@ -833,10 +780,14 @@ if section == "New Entry":
         mood_note = st.text_input("😊 What’s the mood?")
         story = st.text_area("📝 Any topic or story you want to tell?", height=140)
 
-        st.markdown("### 🙏 感恩日記 / Gratitude (Option C)")
-        grat_person = st.text_area("👤 Grateful for someone（今天感謝的一個人 + 他做了什麼）", height=80)
-        grat_thing = st.text_area("🎁 Grateful for something（今天感謝的一件事/物/機會）", height=80)
-        grat_self = st.text_area("💪 Grateful for myself（今天感謝自己的一件事）", height=80)
+        st.markdown("### 🙏 感恩日記 / Gratitude")
+        grat_person = st.text_area("👤 Grateful for someone：今天感謝的一個人（+他做了什麼）", height=80)
+        grat_thing = st.text_area("🎁 Grateful for something：今天感謝的一件事/物/機會", height=80)
+        grat_self = st.text_area("💪 Grateful for myself：今天感謝自己的一件事（努力/選擇/忍住/完成）", height=80)
+
+        st.markdown("### 🧭 最近計劃 / Plans")
+        small_plan = st.text_area("最近有什麼小計劃？（7–14 天）", height=90)
+        big_plan = st.text_area("最近有什麼大計劃？（1–6 個月）", height=90)
 
         choice = st.text_area("🧠 是自主選擇嗎？/ Was it your choice?")
         no_repeat = st.text_area("🚫 今天最不想再來的事 / What you wouldn't repeat?")
@@ -856,6 +807,11 @@ if section == "New Entry":
                 mood=mood,
                 mood_note=mood_note,
                 story=story,
+                grat_person=grat_person,
+                grat_thing=grat_thing,
+                grat_self=grat_self,
+                small_plan=small_plan,
+                big_plan=big_plan,
                 choice=choice,
                 no_repeat=no_repeat,
                 plans_today=plans_today,
@@ -864,9 +820,6 @@ if section == "New Entry":
                 uploaded_images=up_images,
                 uploaded_audio=up_audio,
                 uploaded_videos=up_videos,
-                grat_person=grat_person,
-                grat_thing=grat_thing,
-                grat_self=grat_self,
             )
             st.success("已送出！資料與檔案已同步到 Google Drive ✅")
 
@@ -886,16 +839,14 @@ elif section == "Recent Entries":
             if e.get("meaningful"):
                 st.markdown(f"**Meaningful:** {e['meaningful']}")
 
-            # Gratitude
             render_gratitude_section(e)
+            render_plan_horizon_section(e)
 
-            # bullet plans
             if e.get("plans_today"):
                 render_bullet_block("Plans today:", e["plans_today"])
             if e.get("plans"):
                 render_bullet_block("Plans tomorrow:", e["plans"])
 
-            # Images
             if e.get("images"):
                 st.write("**Images:**")
                 for i, img in enumerate(e["images"]):
@@ -907,7 +858,6 @@ elif section == "Recent Entries":
                         st.write(f"**{img['original_name']}**")
                         create_download_button(img["file_id"], img["original_name"], "image", f"{e['id']}_{i}")
 
-            # Audio
             if e.get("audio"):
                 st.write("**Audio:**")
                 for i, aud in enumerate(e["audio"]):
@@ -925,7 +875,6 @@ elif section == "Recent Entries":
                         st.write(f"**{aud['original_name']}**")
                         create_download_button(aud["file_id"], aud["original_name"], "audio", f"{e['id']}_{i}")
 
-            # Videos
             if e.get("videos"):
                 st.write("**Videos:**")
                 for i, vid in enumerate(e["videos"]):
@@ -938,7 +887,6 @@ elif section == "Recent Entries":
                         st.write(f"**{vid['original_name']}**")
                         create_download_button(vid["file_id"], vid["original_name"], "video", f"{e['id']}_{i}")
 
-            # Tasks - read-only in Recent Entries (no edit/delete functionality)
             if e["tasks"]:
                 st.write("**Tomorrow's Tasks:**")
                 for t in e["tasks"]:
@@ -960,7 +908,6 @@ elif section == "Edit Past Entry":
             sel_id = opts.loc[opts["label"] == chosen, "id"].iloc[0]
             entry = load_entry_detail(sel_id)
             if entry:
-                # Entry deletion section
                 with st.expander("🗑️ 危險區域 / Danger Zone"):
                     st.warning("⚠️ 刪除後無法恢復 / This action cannot be undone")
                     if st.button("🗑️ 刪除這筆日記 / Delete this entry", type="secondary"):
@@ -970,29 +917,33 @@ elif section == "Edit Past Entry":
 
                 with st.form("edit_entry_form", clear_on_submit=False):
                     new_date = st.text_input("日期 / Date (YYYY-MM-DD)", entry["date"])
-                    new_what = st.text_area("What did you do today?", entry["what"] or "", height=140)
-                    new_meaningful = st.text_area("Meaningful event", entry["meaningful"] or "")
-                    new_mood = st.slider("Mood (1-10)", 1, 10, int(entry["mood"] or 5))
+                    new_what = st.text_area("What did you do today?", entry.get("what") or "", height=140)
+                    new_meaningful = st.text_area("Meaningful event", entry.get("meaningful") or "")
+                    new_mood = st.slider("Mood (1-10)", 1, 10, int(entry.get("mood") or 5))
                     new_mood_note = st.text_input("What’s the mood?", entry.get("mood_note") or "")
                     new_story = st.text_area("Any topic or story you want to tell?", entry.get("story") or "", height=140)
 
-                    st.markdown("### 🙏 感恩日記 / Gratitude (Option C)")
-                    new_grat_person = st.text_area("👤 Grateful for someone", entry.get("grat_person") or "", height=80)
-                    new_grat_thing  = st.text_area("🎁 Grateful for something", entry.get("grat_thing") or "", height=80)
-                    new_grat_self   = st.text_area("💪 Grateful for myself", entry.get("grat_self") or "", height=80)
+                    st.markdown("### 🙏 感恩日記 / Gratitude")
+                    new_grat_person = st.text_area("👤 Grateful for someone：今天感謝的一個人（+他做了什麼）", entry.get("grat_person") or "", height=80)
+                    new_grat_thing  = st.text_area("🎁 Grateful for something：今天感謝的一件事/物/機會", entry.get("grat_thing") or "", height=80)
+                    new_grat_self   = st.text_area("💪 Grateful for myself：今天感謝自己的一件事（努力/選擇/忍住/完成）", entry.get("grat_self") or "", height=80)
 
-                    new_choice = st.text_area("Was it your choice?", entry["choice"] or "")
-                    new_no_repeat = st.text_area("What you wouldn't repeat", entry["no_repeat"] or "")
+                    st.markdown("### 🧭 最近計劃 / Plans")
+                    new_small_plan = st.text_area("最近有什麼小計劃？（7–14 天）", entry.get("small_plan") or "", height=90)
+                    new_big_plan   = st.text_area("最近有什麼大計劃？（1–6 個月）", entry.get("big_plan") or "", height=90)
+
+                    new_choice = st.text_area("Was it your choice?", entry.get("choice") or "")
+                    new_no_repeat = st.text_area("What you wouldn't repeat", entry.get("no_repeat") or "")
                     new_plans_today = st.text_area("Plans for today (one per line)", entry.get("plans_today") or "")
                     existing_tasks = "\n".join([t["text"] for t in entry["tasks"]]) if entry["tasks"] else (entry.get("plans") or "")
                     new_plans = st.text_area("Plans for tomorrow (one per line)", existing_tasks)
-                    new_tags = st.text_input("Tags (comma-separated)", entry["tags"] or "")
+                    new_tags = st.text_input("Tags (comma-separated)", entry.get("tags") or "")
                     add_imgs = st.file_uploader("新增圖片 / Add images", type=["png","jpg","jpeg","gif","bmp","webp"], accept_multiple_files=True)
                     add_auds = st.file_uploader("新增音訊 / Add audio", type=["mp3","wav","ogg","m4a","aac","flac"], accept_multiple_files=True)
                     add_vids = st.file_uploader("新增影片 / Add videos", type=["mp4","webm","mov","mkv"], accept_multiple_files=True)
                     submitted_edit = st.form_submit_button("儲存變更 / Save changes")
 
-                # Existing media with edit/delete functionality
+                # Existing media + delete buttons (unchanged)
                 if entry.get("images"):
                     st.write("**現有圖片 / Existing images:**")
                     for i, img in enumerate(entry["images"]):
@@ -1039,7 +990,6 @@ elif section == "Edit Past Entry":
                             if st.button("🗑️ 刪除 / Delete", key=f"del-vid-{vid['id']}"):
                                 delete_media(vid["id"], "videos"); st.rerun()
 
-                # Task management section
                 if entry["tasks"]:
                     st.write("**現有任務 / Existing Tasks:**")
                     for t in entry["tasks"]:
@@ -1058,6 +1008,7 @@ elif section == "Edit Past Entry":
                         """UPDATE entries
                            SET date=?, what=?, meaningful=?, mood=?, mood_note=?, story=?,
                                grat_person=?, grat_thing=?, grat_self=?,
+                               small_plan=?, big_plan=?,
                                choice=?, no_repeat=?, plans_today=?, plans=?, tags=?, summary=?
                            WHERE id=?""",
                         (
@@ -1070,6 +1021,8 @@ elif section == "Edit Past Entry":
                             new_grat_person,
                             new_grat_thing,
                             new_grat_self,
+                            new_small_plan,
+                            new_big_plan,
                             new_choice,
                             new_no_repeat,
                             new_plans_today,
@@ -1090,7 +1043,6 @@ elif section == "Edit Past Entry":
 elif section == "Search Results":
     st.subheader("🔎 搜尋結果 / Search Results")
 
-    # Search controls
     q = st.text_input("Keywords (space-separated)", key="q")
     tag_query = st.text_input("Filter tags (comma-separated)", key="tags_q")
     mood_min, mood_max = st.slider("Mood range", 1, 10, (1, 10), key="mood_q")
@@ -1112,13 +1064,17 @@ elif section == "Search Results":
                 str(row.get("story","")), str(row.get("plans_today","")),
                 str(row.get("plans","")), str(row.get("choice","")),
                 str(row.get("no_repeat","")), str(row.get("tags","")),
-                # NEW gratitude fields searchable
                 str(row.get("grat_person","")), str(row.get("grat_thing","")), str(row.get("grat_self","")),
+                str(row.get("small_plan","")), str(row.get("big_plan","")),
             ]).lower()
+
             for tok in q_tokens:
-                if tok in text_fields: score += 3
+                if tok in text_fields:
+                    score += 3
             for t in tag_tokens:
-                if t in (str(row.get("tags","")).lower()): score += 2
+                if t in (str(row.get("tags","")).lower()):
+                    score += 2
+
             mood = row.get("mood", None)
             if mood is not None:
                 try:
@@ -1127,18 +1083,21 @@ elif section == "Search Results":
                         return -1
                 except Exception:
                     pass
+
             try:
                 d = datetime.datetime.strptime(str(row.get("date","")), "%Y-%m-%d").date()
                 if date_from and d < date_from: return -1
                 if date_to and d > date_to: return -1
             except Exception:
                 pass
+
             return score
 
         q_tokens = [t.strip().lower() for t in (q or "").split() if t.strip()]
         tag_tokens = [t.strip().lower() for t in (tag_query or "").split(",") if t.strip()]
         d_from = date_from if isinstance(date_from, datetime.date) else None
         d_to = date_to if isinstance(date_to, datetime.date) else None
+
         df_all["__score"] = df_all.apply(lambda r: score_row(r, q_tokens, tag_tokens, (mood_min, mood_max), d_from, d_to), axis=1)
         res = df_all[df_all["__score"] >= 0].sort_values(["__score","date"], ascending=[False, False]).head(50)
 
@@ -1146,8 +1105,6 @@ elif section == "Search Results":
             st.info("找不到符合的結果。")
         else:
             st.write(f"Found {len(res)} matching entries:")
-
-            # Load complete entry details for each search result
             for _, r in res.iterrows():
                 entry_id = r["id"]
                 entry = load_entry_detail(entry_id)
@@ -1161,7 +1118,7 @@ elif section == "Search Results":
 
                 if entry.get("mood_note"):
                     st.markdown(f"**Mood note:** {entry['mood_note']}")
-                st.markdown(f"**What:** {entry['what'] or ''}")
+                st.markdown(f"**What:** {entry.get('what') or ''}")
                 if entry.get("story"):
                     st.markdown(f"**Story:** {entry['story']}")
                 if entry.get("meaningful"):
@@ -1171,8 +1128,8 @@ elif section == "Search Results":
                 if entry.get("no_repeat"):
                     st.markdown(f"**Won't repeat:** {entry['no_repeat']}")
 
-                # Gratitude
                 render_gratitude_section(entry)
+                render_plan_horizon_section(entry)
 
                 if entry.get("plans_today"):
                     render_bullet_block("Plans today:", entry["plans_today"])
@@ -1182,7 +1139,7 @@ elif section == "Search Results":
                 if entry.get("tags"):
                     st.markdown(f"**Tags:** {entry['tags']}")
 
-                # Images (read-only)
+                # media (same as your existing)
                 if entry.get("images"):
                     st.write("**Images:**")
                     for i, img in enumerate(entry["images"]):
@@ -1197,7 +1154,6 @@ elif section == "Search Results":
                             st.write(f"**{img['original_name']}**")
                             create_download_button(img["file_id"], img["original_name"], "image", f"search_{entry_id}_{i}")
 
-                # Audio (read-only)
                 if entry.get("audio"):
                     st.write("**Audio:**")
                     for i, aud in enumerate(entry["audio"]):
@@ -1221,7 +1177,6 @@ elif section == "Search Results":
                             st.write(f"**{aud['original_name']}**")
                             create_download_button(aud["file_id"], aud["original_name"], "audio", f"search_{entry_id}_{i}")
 
-                # Videos (read-only)
                 if entry.get("videos"):
                     st.write("**Videos:**")
                     for i, vid in enumerate(entry["videos"]):
@@ -1237,8 +1192,7 @@ elif section == "Search Results":
                             st.write(f"**{vid['original_name']}**")
                             create_download_button(vid["file_id"], vid["original_name"], "video", f"search_{entry_id}_{i}")
 
-                # Tasks (read-only display)
-                if entry["tasks"]:
+                if entry.get("tasks"):
                     st.write("**Tasks:**")
                     for t in entry["tasks"]:
                         status_icon = "✅" if t["is_done"] else "⬜"
